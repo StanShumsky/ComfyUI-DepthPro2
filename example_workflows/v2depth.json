@@ -17,7 +17,7 @@
       "title": "DepthPro2 — Video to Depth",
       "properties": {},
       "widgets_values": [
-        "## DepthPro2 — Video to Depth\n\nTemporally consistent metric depth for a video with [Apple Depth Pro 2](https://huggingface.co/apple/DepthPro2). Uses ComfyUI's built-in video nodes — keep ComfyUI up to date.\n\n**How it works**\n- Frames are processed jointly in overlapping windows and share one focal length, so depth stays steady from frame to frame.\n- `window`: frames attended together (default 16). `overlap`: frames shared between consecutive windows (default 4). Longer windows / larger overlap = steadier but slower.\n- `f_px`: `0` estimates one focal length from the first window.\n- `max_size`: cap the longest side; `0` = native resolution.\n\n**Out of memory?** Lower `window` (and `overlap` with it) first, then `max_size`, then switch to a smaller model (`depthpro2-s`).\n\n**Output**\n- `depth_image` is normalized over the whole batch, so brightness does not flicker between frames. The source fps is carried through to the saved video.\n- `depth_meters` carries raw metric depth (`inf` at sky) for downstream use.\n\nWeights are licensed for **non-commercial research only** (Apple AMLR)."
+        "## DepthPro2 — Video to Depth\n\nTemporally consistent metric depth for a video with [Apple Depth Pro 2](https://huggingface.co/apple/DepthPro2). Uses ComfyUI's built-in video nodes — keep ComfyUI up to date.\n\n**How it works**\n- Frames are processed jointly in overlapping windows and share one focal length, so depth stays steady from frame to frame.\n- `window`: frames attended together (default 16). `overlap`: frames shared between consecutive windows (default 4). Longer windows / larger overlap = steadier but slower. `mode`: `buffered` lets each frame also see later frames; `unbuffered` predicts each frame from itself and earlier ones (lower latency and memory, overlap ignored).\n- `focal_length_mm`: 35mm-equivalent focal length in mm; `0` estimates one focal length from the first window. For cine cameras, link the **DepthPro2 Focal Length** node (physical mm + sensor size) to the optional `focal_length_px` input instead.\n- `max_size`: cap the longest side; `0` = native resolution.\n\n**Out of memory?** Lower `window` (and `overlap` with it) first, then `max_size`, then switch to a smaller model (`depthpro2-s`).\n\n**Output**\n- `depth_image` is normalized over the whole batch, so brightness does not flicker between frames. The source fps is carried through to the saved video.\n- `depth_meters` carries raw metric depth (`inf` at sky) for downstream use.\n\nWeights are licensed for **non-commercial research only** (Apple AMLR)."
       ]
     },
     {
@@ -151,7 +151,7 @@
       "properties": {
         "Node name for S&R": "DepthPro2Video"
       },
-      "widgets_values": [16, 4, 0.0, 0]
+      "widgets_values": [16, 4, 0.0, 0, "buffered"]
     },
     {
       "id": 6,

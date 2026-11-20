@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 
 import torch
@@ -16,6 +17,7 @@ from comfy.utils import ProgressBar
 
 from .depth_pro_2 import PRESETS, DepthPro2
 from .depth_pro_2.model import to_normalized_tensor
+from .colormaps import COLORMAPS, color_scale, colorize, inverse_metric
 from .fp8 import QuantizedLinear, quantize_linears
 
 LOGGER = logging.getLogger(__name__)
@@ -171,6 +173,74 @@ def load_depthpro2(name: str, precision: str, device: str) -> dict:
     return {"model": model, "device": torch_device, "name": name, "precision": precision}
 
 
+def _focal_mm_to_px(focal_mm: float, height: int, width: int) -> float:
+    """35mm-equivalent focal length -> pixels of the input image (35mm frame: 36x24mm)."""
+    if focal_mm <= 0:
+        return 0.0
+    return focal_mm * math.hypot(width, height) / math.hypot(36.0, 24.0)
+
+
+# Sensor width is what matters for focal conversion; heights are listed for recognition.
+SENSOR_PRESETS = {
+    "Full frame 36x24 (Sony Venice, Canon R5)": (36.0, 24.0),
+    "ARRI ALEXA 35 (27.99x19.22)": (27.99, 19.22),
+    "ARRI ALEXA Mini LF (36.70x25.54)": (36.70, 25.54),
+    "ARRI ALEXA Mini / AMIRA (28.25x18.17)": (28.25, 18.17),
+    "Blackmagic URSA 12K (27.03x14.25)": (27.03, 14.25),
+    "Blackmagic Pocket 6K (23.10x12.99)": (23.10, 12.99),
+    "Super 35 3-perf (24.89x18.66)": (24.89, 18.66),
+    "APS-C Sony/Fujifilm (23.5x15.6)": (23.5, 15.6),
+    "APS-C Canon (22.3x14.9)": (22.3, 14.9),
+    "Micro Four Thirds (17.3x13)": (17.3, 13.0),
+    "1-inch (13.2x8.8)": (13.2, 8.8),
+    "custom": None,
+}
+
+
+class DepthPro2FocalLength:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "focal_length_mm": ("FLOAT", {"default": 35.0, "min": 0.0, "step": 0.5}),
+                "sensor": (list(SENSOR_PRESETS), {"default": next(iter(SENSOR_PRESETS))}),
+                "sensor_width_mm": ("FLOAT", {"default": 36.0, "min": 0.1, "max": 100.0, "step": 0.01}),
+                "width": ("INT", {"default": 1920, "min": 1, "max": 16384}),
+            },
+            "optional": {"image": ("IMAGE",)},
+        }
+
+    RETURN_TYPES = ("FLOAT",)
+    RETURN_NAMES = ("focal_length_px",)
+    FUNCTION = "convert"
+    CATEGORY = "depth/DepthPro2"
+    DESCRIPTION = (
+        "Convert a physical lens focal length (mm, as engraved on the lens) to pixels for a "
+        "known sensor size, for cine/mirrorless cameras (ARRI, Blackmagic, Sony...). Link the "
+        "image to use its width, or set width manually. Pick a sensor preset or 'custom' "
+        "with sensor_width_mm; the conversion assumes the image spans the full sensor width "
+        "(for cropped readouts, use the width of the sensor area actually used). Link the "
+        "output to the focal_length_px input of the Estimate/Video nodes. For phone photos "
+        "and unknown cameras, use the focal_length_mm (35mm-equivalent) widget instead."
+    )
+
+    def convert(
+        self,
+        focal_length_mm: float,
+        sensor: str,
+        sensor_width_mm: float,
+        width: int,
+        image: torch.Tensor | None = None,
+    ):
+        if image is not None:
+            width = image.shape[2]
+        preset = SENSOR_PRESETS[sensor]
+        sensor_w = preset[0] if preset is not None else sensor_width_mm
+        if focal_length_mm <= 0:
+            return (0.0,)
+        return (focal_length_mm * width / sensor_w,)
+
+
 def _prepare_frames(
     images: torch.Tensor, device: torch.device, max_size: int, f_px: float
 ) -> tuple[list[torch.Tensor], float | None, float]:
@@ -263,9 +333,10 @@ class DepthPro2Estimate:
             "required": {
                 "model": ("DEPTHPRO2_MODEL",),
                 "image": ("IMAGE",),
-                "f_px": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.1}),
+                "focal_length_mm": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.5}),
                 "max_size": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 32}),
-            }
+            },
+            "optional": {"focal_length_px": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.1})},
         }
 
     RETURN_TYPES = ("IMAGE", "DEPTHPRO2_DEPTH", "FLOAT")
@@ -275,13 +346,24 @@ class DepthPro2Estimate:
     DESCRIPTION = (
         "Estimate metric depth for each image of the batch independently. depth_image is "
         "normalized inverse depth (near white, far black) for preview/ControlNet; depth_meters "
-        "is raw metric depth (T, H, W) with inf at sky. f_px is the focal length in pixels of "
-        "the input image; 0 estimates it with the focal-length model. max_size caps the longest "
-        "side processed (0 = native resolution, sharpest edges)."
+        "is raw metric depth (T, H, W) with inf at sky. focal_length_mm is the lens focal length "
+        "as a 35mm-equivalent (e.g. 24, 35, 50 — the EXIF FocalLengthIn35mmFilm value); 0 "
+        "estimates it with the focal-length model. Depth in meters scales linearly with focal "
+        "length. max_size caps the longest side processed (0 = native resolution, sharpest edges). "
+        "For physical mm with a known camera sensor, link the Focal Length node's focal_length_px "
+        "output to the optional focal_length_px input; it overrides focal_length_mm."
     )
 
-    def estimate(self, model: dict, image: torch.Tensor, f_px: float, max_size: int):
+    def estimate(
+        self,
+        model: dict,
+        image: torch.Tensor,
+        focal_length_mm: float,
+        max_size: int,
+        focal_length_px: float | None = None,
+    ):
         net, device = model["model"], model["device"]
+        f_px = focal_length_px or _focal_mm_to_px(focal_length_mm, *image.shape[1:3])
         frames, focal, scale = _prepare_frames(image, device, max_size, f_px)
         progress = ProgressBar(len(frames))
         predictions = []
@@ -301,9 +383,11 @@ class DepthPro2Video:
                 "images": ("IMAGE",),
                 "window": ("INT", {"default": 16, "min": 1, "max": 64}),
                 "overlap": ("INT", {"default": 4, "min": 0, "max": 63}),
-                "f_px": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.1}),
+                "focal_length_mm": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.5}),
                 "max_size": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 32}),
-            }
+                "mode": (["buffered", "unbuffered"], {"default": "buffered"}),
+            },
+            "optional": {"focal_length_px": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.1})},
         }
 
     RETURN_TYPES = ("IMAGE", "DEPTHPRO2_DEPTH", "FLOAT")
@@ -312,9 +396,14 @@ class DepthPro2Video:
     CATEGORY = "depth/DepthPro2"
     DESCRIPTION = (
         "Temporally consistent depth for a video batch: frames are processed jointly in "
-        "overlapping windows and share one focal length. Lower window/overlap if you run out "
+        "overlapping windows and share one focal length. focal_length_mm is the 35mm-equivalent "
+        "focal length (0 estimates it from the first window). Lower window/overlap if you run out "
         "of memory. depth_image is normalized over the whole batch so brightness is steady "
-        "across frames."
+        "across frames. buffered lets each frame also see later frames (overlap applies); "
+        "unbuffered predicts each frame from itself and the frames before it, at lower latency "
+        "and memory (overlap is ignored). Link the Focal Length node's focal_length_px output "
+        "to the optional focal_length_px input to override focal_length_mm with a sensor-aware "
+        "physical focal length."
     )
 
     def estimate(
@@ -323,16 +412,21 @@ class DepthPro2Video:
         images: torch.Tensor,
         window: int,
         overlap: int,
-        f_px: float,
+        focal_length_mm: float,
         max_size: int,
+        mode: str = "buffered",
+        focal_length_px: float | None = None,
     ):
-        if overlap >= window:
+        if mode == "buffered" and overlap >= window:
             raise ValueError("overlap must be smaller than window.")
         net, device = model["model"], model["device"]
+        f_px = focal_length_px or _focal_mm_to_px(focal_length_mm, *images.shape[1:3])
         frames, focal, scale = _prepare_frames(images, device, max_size, f_px)
         progress = ProgressBar(len(frames))
         predictions = []
-        for prediction in net.infer_video(iter(frames), window=window, overlap=overlap, f_px=focal):
+        for prediction in net.infer_video(
+            iter(frames), window=window, overlap=overlap, f_px=focal, mode=mode
+        ):
             predictions.append(prediction)
             progress.update(1)
         mm.soft_empty_cache()
@@ -349,13 +443,144 @@ class DepthPro2Video:
         return image, depth, focal_out
 
 
+class DepthPro2Colorize:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "depth": ("DEPTHPRO2_DEPTH",),
+                "colormap": (list(COLORMAPS), {"default": "turbo"}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("depth_color",)
+    FUNCTION = "colorize"
+    CATEGORY = "depth/DepthPro2"
+    DESCRIPTION = (
+        "Color preview of metric depth, as in Apple's CLI: turbo maps dark blue at infinitely "
+        "far to red/white near. The scale is fixed by the first frame's nearest point plus 20% "
+        "headroom, so a video stays steady and points coming nearer later saturate. gray uses "
+        "the same scale in grayscale (white near, black infinitely far)."
+    )
+
+    def colorize(self, depth: torch.Tensor, colormap: str):
+        inverse = inverse_metric(depth)
+        return (colorize(inverse, colormap, color_scale(inverse)),)
+
+
+class DepthPro2PositionPass:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "depth": ("DEPTHPRO2_DEPTH",),
+                "focal_length_px": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.1}),
+                "max_depth": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.5}),
+                "cx_offset": ("FLOAT", {"default": 0.0, "min": -4096.0, "max": 4096.0, "step": 0.5}),
+                "cy_offset": ("FLOAT", {"default": 0.0, "min": -4096.0, "max": 4096.0, "step": 0.5}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("position_xyz", "valid")
+    FUNCTION = "position"
+    CATEGORY = "depth/DepthPro2"
+    DESCRIPTION = (
+        "Camera-space position pass in meters: X right, Y down, Z along the viewing direction, "
+        "back-projected from metric depth with focal_length_px (link it from the estimate node) "
+        "and the image center as principal point, shifted by cx_offset/cy_offset for calibrated "
+        "cameras. Sky and pixels beyond max_depth (0 = no clip) are zero with valid = 0; clip "
+        "before making point clouds, as sky depth is unreliable."
+    )
+
+    def position(
+        self,
+        depth: torch.Tensor,
+        focal_length_px: float,
+        max_depth: float,
+        cx_offset: float,
+        cy_offset: float,
+    ):
+        if focal_length_px <= 0:
+            raise ValueError("focal_length_px must be positive; link it from the estimate node.")
+        height, width = depth.shape[-2:]
+        valid = torch.isfinite(depth) & (depth > 0)
+        if max_depth > 0:
+            valid = valid & (depth <= max_depth)
+        z = torch.where(valid, depth, torch.zeros_like(depth))
+        u = torch.arange(width, dtype=torch.float32) + 0.5 - (width / 2 + cx_offset)
+        v = torch.arange(height, dtype=torch.float32) + 0.5 - (height / 2 + cy_offset)
+        x = z * u.view(1, 1, width) / focal_length_px
+        y = z * v.view(1, height, 1) / focal_length_px
+        return (torch.stack([x, y, z], dim=-1), valid.to(torch.float32))
+
+
+class DepthPro2Save16:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "depth": ("DEPTHPRO2_DEPTH",),
+                "filename_prefix": ("STRING", {"default": "depthpro2/depth16"}),
+            }
+        }
+
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+    FUNCTION = "save"
+    CATEGORY = "depth/DepthPro2"
+    DESCRIPTION = (
+        "Save inverse metric depth as 16-bit grayscale PNGs (white near, black infinitely far) "
+        "on the color preview's scale, for compositing tools: read as raw data (Raw in Nuke, "
+        "Non-Color in Blender). Depth in meters = k / value; k is logged and stored in each "
+        "PNG's depthpro2_k text chunk. 0 is infinitely far. Shows an 8-bit preview on the node."
+    )
+
+    def save(self, depth: torch.Tensor, filename_prefix: str):
+        from PIL import Image
+        from PIL.PngImagePlugin import PngInfo
+
+        inverse = inverse_metric(depth)
+        scale = color_scale(inverse)
+        k = 65535.0 / scale
+        height, width = depth.shape[-2:]
+        folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+            filename_prefix, folder_paths.get_output_directory(), width, height
+        )
+        temp_dir = Path(folder_paths.get_temp_directory())
+        previews = []
+        for frame in inverse:
+            normalized = (frame / scale).clamp(0, 1)
+            values = normalized.mul(65535).round().to(torch.uint16).numpy()
+            meta = PngInfo()
+            meta.add_text("depthpro2_k", f"{k:.6g}")
+            path = Path(folder) / f"{filename}_{counter:05d}.png"
+            Image.fromarray(values).save(path, pnginfo=meta, compress_level=1)
+            preview_name = f"{filename}_{counter:05d}_preview.png"
+            preview = normalized.mul(255).round().to(torch.uint8).numpy()
+            Image.fromarray(preview).save(temp_dir / preview_name, compress_level=1)
+            previews.append({"filename": preview_name, "subfolder": "", "type": "temp"})
+            counter += 1
+        LOGGER.info("DepthPro2 16-bit: depth in meters = %.2f / value, 0 is infinitely far.", k)
+        return {"ui": {"images": previews}}
+
+
 NODE_CLASS_MAPPINGS = {
     "DepthPro2Loader": DepthPro2Loader,
     "DepthPro2Estimate": DepthPro2Estimate,
     "DepthPro2Video": DepthPro2Video,
+    "DepthPro2FocalLength": DepthPro2FocalLength,
+    "DepthPro2Colorize": DepthPro2Colorize,
+    "DepthPro2PositionPass": DepthPro2PositionPass,
+    "DepthPro2Save16": DepthPro2Save16,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "DepthPro2Loader": "DepthPro2 Loader",
     "DepthPro2Estimate": "DepthPro2 Estimate Depth",
     "DepthPro2Video": "DepthPro2 Video Depth",
+    "DepthPro2FocalLength": "DepthPro2 Focal Length",
+    "DepthPro2Colorize": "DepthPro2 Colorize Depth",
+    "DepthPro2PositionPass": "DepthPro2 Position Pass",
+    "DepthPro2Save16": "DepthPro2 Save 16-bit Depth",
 }

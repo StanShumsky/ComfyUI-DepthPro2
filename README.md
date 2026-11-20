@@ -44,8 +44,12 @@ into that folder — the size is auto-detected, or read from a `config.json` nex
 
 ### DepthPro2 Estimate Depth
 Each image of the batch is processed independently (use this for unrelated photos).
-- `f_px`: focal length in pixels of the input; `0` estimates it with the focal-length model.
-  Depth in meters scales linearly with focal length — provide it when you know it.
+- `focal_length_mm`: lens focal length as a **35mm-equivalent** in mm (e.g. 24, 35, 50 — the
+  EXIF `FocalLengthIn35mmFilm` value); `0` estimates it with the focal-length model. Depth in
+  meters scales linearly with focal length — provide it when you know it. Converted to pixels
+  internally via `f_px = f35 * sqrt(W² + H²) / 43.27`.
+- `focal_length_px` (optional input): overrides `focal_length_mm` when linked — use the
+  Focal Length node below for physical mm with a known camera sensor.
 - `max_size`: cap the longest side processed (`0` = native resolution, sharpest edges).
 - Outputs:
   - `depth_image` (IMAGE): normalized inverse depth, near white / far black, for preview or
@@ -57,13 +61,45 @@ Each image of the batch is processed independently (use this for unrelated photo
 Frames are processed jointly in overlapping windows (`window`, `overlap`) and share one
 focal length, giving temporally steady depth. The visualization is normalized over the whole
 batch. Reduce `window`/`overlap` first if you run out of memory.
+- `mode`: `buffered` (each frame also sees later frames; `overlap` applies) or `unbuffered`
+  (each frame predicted from itself and the frames before it — lower latency and memory,
+  `overlap` ignored), as in the upstream CLI.
+
+### DepthPro2 Focal Length
+Converts a **physical** lens focal length (mm, as engraved on the lens) to pixels for a known
+sensor size — for cine/mirrorless cameras (ARRI, Blackmagic, Sony…). Presets cover full frame,
+ALEXA 35 / Mini LF / Mini-AMIRA, URSA 12K, Pocket 6K, Super 35, APS-C, Micro Four Thirds and
+1-inch; `custom` takes an exact `sensor_width_mm` (for cropped readouts, use the width of the
+sensor area actually used). Link `image` to take the width from it, or set `width` manually.
+Link the `focal_length_px` output to the optional `focal_length_px` input of the Estimate/Video
+nodes; it overrides `focal_length_mm`. For phone photos and unknown cameras, keep using the
+35mm-equivalent `focal_length_mm` widget instead.
+
+### DepthPro2 Colorize Depth
+Color preview of `depth_meters`, matching Apple's CLI: `turbo` (byte-identical LUT) maps dark
+blue at infinitely far to red/white near; also `viridis`, `inferno`, `magma`, `plasma`, `gray`.
+The scale is fixed by the first frame's nearest point plus 20% headroom, so videos stay steady
+and points coming nearer later saturate. Outputs `depth_color` (IMAGE).
+
+### DepthPro2 Position Pass
+Camera-space position pass in meters from `depth_meters` + `focal_length_px`: X right, Y down,
+Z along the viewing direction, principal point at the image center (`cx_offset`/`cy_offset`
+shift it for calibrated cameras). `max_depth` clips the unreliable far range (`0` = no clip).
+Outputs `position_xyz` (IMAGE, `(T, H, W, 3)`) and `valid` (MASK); sky and clipped pixels are
+zero with `valid = 0`.
+
+### DepthPro2 Save 16-bit Depth
+Writes `depth_meters` as 16-bit grayscale PNGs (white near, black infinitely far) on the color
+preview's scale, for compositing tools — read as raw data (Raw in Nuke, Non-Color in Blender).
+Depth in meters = `k / value`; `k` is logged and stored in each PNG's `depthpro2_k` text chunk.
+An 8-bit preview is shown on the node (written to ComfyUI's temp dir, not the output folder).
 
 ## Example workflows
 
 Drag into ComfyUI (or use Workflow → Open):
 
 - [example_workflows/i2depth.json](example_workflows/i2depth.json) — image → depth:
-  Loader → Estimate → Preview/Save.
+  Loader → Estimate → Preview/Save, plus a turbo color preview branch.
 - [example_workflows/v2depth.json](example_workflows/v2depth.json) — video → depth:
   LoadVideo → GetVideoComponents → Video Depth → CreateVideo → SaveVideo, with the source
   fps carried through. Uses ComfyUI's built-in video nodes (keep ComfyUI up to date).
@@ -72,9 +108,21 @@ Drag into ComfyUI (or use Workflow → Open):
 
 - Depth is the distance along the camera's viewing direction (z), not radial distance.
 - Sky pixels have infinite depth (or several km with the smaller models); clip before making
-  point clouds.
-- To convert depth to 3D points, use `focal_length_px` with the image center as principal
-  point: `X = (u - cx) * Z / f`, `Y = (v - cy) * Z / f`.
+  point clouds — the Position Pass node's `max_depth` does this for you.
+- To convert depth to 3D points yourself, use `focal_length_px` with the image center as
+  principal point: `X = (u - cx) * Z / f`, `Y = (v - cy) * Z / f`.
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest                                  # unit + example-workflow tests: no weights, no network
+RUN_DP2_WEIGHT_TESTS=1 pytest -m integration   # end-to-end on real weights (S + focal, ~190 MB once)
+```
+
+Integration tests download into `$DP2_MODELS_DIR` (default: a temp dir) and run on ComfyUI's
+device selection (CUDA/MPS/CPU). Tests live in the repository but are excluded from the
+published registry archive via `.comfyignore`, as the registry docs recommend.
 
 ## License
 
