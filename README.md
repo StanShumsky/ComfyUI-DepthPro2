@@ -26,7 +26,7 @@ and CPU; the focal-length estimator always stays in high precision.
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone <this repo> ComfyUI-DepthPro2
+git clone https://github.com/StanShumsky/ComfyUI-DepthPro2
 pip install -r ComfyUI-DepthPro2/requirements.txt
 ```
 
@@ -78,6 +78,7 @@ Drag into ComfyUI (or use Workflow → Open):
 
 ## License
 
+- The node code in this repository is Apache-2.0 (see `LICENSE`).
 - The vendored [depth_pro_2/](depth_pro_2/) code is Apple's, redistributed under its
   permissive sample-code license (see `depth_pro_2/LICENSE`); modifications here make
   `av`/`pillow_heif` optional.
