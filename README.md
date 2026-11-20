@@ -46,8 +46,7 @@ into that folder — the size is auto-detected, or read from a `config.json` nex
 Each image of the batch is processed independently (use this for unrelated photos).
 - `focal_length_mm`: lens focal length as a **35mm-equivalent** in mm (e.g. 24, 35, 50 — the
   EXIF `FocalLengthIn35mmFilm` value); `0` estimates it with the focal-length model. Depth in
-  meters scales linearly with focal length — provide it when you know it. Converted to pixels
-  internally via `f_px = f35 * sqrt(W² + H²) / 43.27`.
+  meters scales linearly with focal length — provide it when you know it.
 - `focal_length_px` (optional input): overrides `focal_length_mm` when linked — use the
   Focal Length node below for physical mm with a known camera sensor.
 - `max_size`: cap the longest side processed (`0` = native resolution, sharpest edges).
@@ -56,6 +55,7 @@ Each image of the batch is processed independently (use this for unrelated photo
     ControlNet-style conditioning.
   - `depth_meters` (DEPTHPRO2_DEPTH): raw metric depth tensor `(T, H, W)`, `inf` at sky.
   - `focal_length_px` (FLOAT): focal length used, in pixels of the original input.
+  - `sky` (MASK): 1 at sky pixels — a ready-made comp holdout.
 
 ### DepthPro2 Video Depth
 Frames are processed jointly in overlapping windows (`window`, `overlap`) and share one
@@ -94,6 +94,20 @@ preview's scale, for compositing tools — read as raw data (Raw in Nuke, Non-Co
 Depth in meters = `k / value`; `k` is logged and stored in each PNG's `depthpro2_k` text chunk.
 An 8-bit preview is shown on the node (written to ComfyUI's temp dir, not the output folder).
 
+### DepthPro2 Save Float Depth
+Lossless 32-bit float export of `depth_meters` in **true meters** for compositing (Nuke, Fusion,
+Blender) — unlike the 16-bit node, no inverse scale is baked in. `format`: `exr` (single channel
+`Z`, needs the optional [OpenEXR](https://pypi.org/project/OpenEXR/) package:
+`pip install OpenEXR`) or `tiff` (float32, no extra dependencies). `sky_value` replaces sky with
+a far distance (`0` keeps infinity). Link `focal_length_px` from the estimate node to embed it in
+the file metadata together with units and the sky convention. Shows an 8-bit preview on the node.
+
+### DepthPro2 Save PLY Points
+Metric point cloud (binary PLY, in meters) from the Position Pass outputs: link `position_xyz`
+and `valid`; only valid points are written, sky and clipped pixels are dropped. Link the original
+`image` for per-point RGB. Coordinates are camera-space (X right, Y down, Z forward) — flip Y in
+DCCs that expect Y up. Opens in MeshLab, Blender and CloudCompare.
+
 ## Example workflows
 
 Drag into ComfyUI (or use Workflow → Open):
@@ -109,8 +123,8 @@ Drag into ComfyUI (or use Workflow → Open):
 - Depth is the distance along the camera's viewing direction (z), not radial distance.
 - Sky pixels have infinite depth (or several km with the smaller models); clip before making
   point clouds — the Position Pass node's `max_depth` does this for you.
-- To convert depth to 3D points yourself, use `focal_length_px` with the image center as
-  principal point: `X = (u - cx) * Z / f`, `Y = (v - cy) * Z / f`.
+- Depth → 3D points: the **Position Pass** node outputs camera-space XYZ with the image center
+  as principal point; chain it into **Save PLY Points** for a metric point cloud.
 
 ## Tests
 

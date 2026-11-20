@@ -71,13 +71,14 @@ def test_depth_outputs_upscale_and_focal(nodes):
         {"inverse_depth": inverse[i], "depth": 1.0 / inverse[i], "focallength_px": torch.tensor(250.0)}
         for i in range(2)
     ]
-    image, depth, focal = nodes._depth_outputs(preds, (16, 16), 0.5)
+    image, depth, focal, sky = nodes._depth_outputs(preds, (16, 16), 0.5)
     assert image.shape == (2, 16, 16, 3) and depth.shape == (2, 16, 16)
-    assert focal == 500.0
+    assert focal == 500.0 and sky.max() == 0.0
     preds[1]["depth"] = None
     preds[1]["focallength_px"] = None
-    _, depth, focal = nodes._depth_outputs(preds, (8, 8), 1.0)
+    _, depth, focal, sky = nodes._depth_outputs(preds, (8, 8), 1.0)
     assert torch.isnan(depth[1]).all() and focal == 250.0
+    assert sky[1].min() == 1.0 and sky[0].max() == 0.0
 
 
 def test_detect_preset(nodes):
@@ -162,6 +163,45 @@ def test_save16(nodes, output_dir):
     near = values > 1000
     rel = np.abs(k / values[near] - depth[0].numpy()[near]) / depth[0].numpy()[near]
     assert np.median(rel) < 1e-3
+
+
+def test_save_float_tiff(nodes, output_dir):
+    depth = synthetic_depth()
+    result = nodes.DepthPro2SaveFloat().save(depth, "unit/float", "tiff", 0.0, focal_length_px=500.0)
+    files = sorted((output_dir / "unit").glob("float_*.tif"))
+    assert len(files) == 2
+    img = Image.open(files[0])
+    assert img.mode == "F"
+    values = torch.from_numpy(np.array(img))
+    finite = torch.isfinite(depth[0])
+    assert torch.equal(values[finite], depth[0][finite])
+    assert torch.isinf(values[~finite]).all()
+    assert img.tag_v2[65000] == "meters" and img.tag_v2[65002] == "500"
+    assert len(result["ui"]["images"]) == 2
+    nodes.DepthPro2SaveFloat().save(depth, "unit/clipped", "tiff", 5000.0)
+    clipped = torch.from_numpy(np.array(Image.open(sorted((output_dir / "unit").glob("clipped_*.tif"))[0])))
+    assert clipped[0, 0] == 5000.0
+
+
+def test_save_ply(nodes, output_dir):
+    depth = synthetic_depth()
+    pos, valid = nodes.DepthPro2PositionPass().position(depth, 500.0, 0.0, 0.0, 0.0)
+    nodes.DepthPro2SavePLY().save(pos, valid, "unit/points")
+    files = sorted((output_dir / "unit").glob("points_*.ply"))
+    assert len(files) == 2
+    header, _, body = files[0].read_bytes().partition(b"end_header\n")
+    n = int(header.split(b"element vertex ")[1].split(b"\n")[0])
+    assert n == int(valid[0].sum()) and b"property uchar red" not in header
+    rec = np.frombuffer(body, dtype=np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4")]))
+    assert len(rec) == n and np.isfinite(rec["z"]).all()
+    z = float(depth[0, 0, 4])
+    assert abs(rec[0]["x"] - (4 + 0.5 - 12) * z / 500.0) < 1e-4
+    assert abs(rec[0]["z"] - z) < 1e-4
+    nodes.DepthPro2SavePLY().save(pos, valid, "unit/color", image=torch.rand(2, 16, 24, 3))
+    cheader, _, cbody = sorted((output_dir / "unit").glob("color_*.ply"))[0].read_bytes().partition(b"end_header\n")
+    assert b"property uchar red" in cheader and len(cbody) == n * 15
+    with pytest.raises(ValueError):
+        nodes.DepthPro2SavePLY().save(pos, valid, "unit/bad", image=torch.rand(2, 8, 8, 3))
 
 
 def test_video_overlap_validation(nodes, make_batch):

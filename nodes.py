@@ -278,7 +278,7 @@ def _normalize_inverse_depth(inverse_depth: torch.Tensor) -> torch.Tensor:
 
 def _depth_outputs(
     predictions: list[dict], original_size: tuple[int, int], scale: float
-) -> tuple[torch.Tensor, torch.Tensor, float]:
+) -> tuple[torch.Tensor, torch.Tensor, float, torch.Tensor]:
     inverse = torch.stack([p["inverse_depth"].float().cpu() for p in predictions])
     depth = torch.stack(
         [
@@ -296,7 +296,8 @@ def _depth_outputs(
     if predictions[0]["focallength_px"] is not None:
         # Report in pixels of the original input, undoing any max_size downscale.
         focal = float(predictions[0]["focallength_px"]) / scale
-    return image, depth, focal
+    sky = (~torch.isfinite(depth)).to(torch.float32)
+    return image, depth, focal, sky
 
 
 class DepthPro2Loader:
@@ -339,14 +340,15 @@ class DepthPro2Estimate:
             "optional": {"focal_length_px": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.1})},
         }
 
-    RETURN_TYPES = ("IMAGE", "DEPTHPRO2_DEPTH", "FLOAT")
-    RETURN_NAMES = ("depth_image", "depth_meters", "focal_length_px")
+    RETURN_TYPES = ("IMAGE", "DEPTHPRO2_DEPTH", "FLOAT", "MASK")
+    RETURN_NAMES = ("depth_image", "depth_meters", "focal_length_px", "sky")
     FUNCTION = "estimate"
     CATEGORY = "depth/DepthPro2"
     DESCRIPTION = (
         "Estimate metric depth for each image of the batch independently. depth_image is "
         "normalized inverse depth (near white, far black) for preview/ControlNet; depth_meters "
-        "is raw metric depth (T, H, W) with inf at sky. focal_length_mm is the lens focal length "
+        "is raw metric depth (T, H, W) with inf at sky; sky is a MASK (1 at sky) for comp "
+        "holdouts. focal_length_mm is the lens focal length "
         "as a 35mm-equivalent (e.g. 24, 35, 50 — the EXIF FocalLengthIn35mmFilm value); 0 "
         "estimates it with the focal-length model. Depth in meters scales linearly with focal "
         "length. max_size caps the longest side processed (0 = native resolution, sharpest edges). "
@@ -390,8 +392,8 @@ class DepthPro2Video:
             "optional": {"focal_length_px": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.1})},
         }
 
-    RETURN_TYPES = ("IMAGE", "DEPTHPRO2_DEPTH", "FLOAT")
-    RETURN_NAMES = ("depth_image", "depth_meters", "focal_length_px")
+    RETURN_TYPES = ("IMAGE", "DEPTHPRO2_DEPTH", "FLOAT", "MASK")
+    RETURN_NAMES = ("depth_image", "depth_meters", "focal_length_px", "sky")
     FUNCTION = "estimate"
     CATEGORY = "depth/DepthPro2"
     DESCRIPTION = (
@@ -430,7 +432,7 @@ class DepthPro2Video:
             predictions.append(prediction)
             progress.update(1)
         mm.soft_empty_cache()
-        image, depth, focal_out = _depth_outputs(predictions, tuple(images.shape[1:3]), scale)
+        image, depth, focal_out, sky = _depth_outputs(predictions, tuple(images.shape[1:3]), scale)
         # One shared range keeps the visualization temporally steady.
         finite = torch.isfinite(depth) & (depth > 0)
         if finite.any():
@@ -440,7 +442,7 @@ class DepthPro2Video:
             hi = inverse[finite].max()
             if hi > lo:
                 image = ((inverse - lo) / (hi - lo)).clamp(0, 1).unsqueeze(-1).repeat(1, 1, 1, 3)
-        return image, depth, focal_out
+        return image, depth, focal_out, sky
 
 
 class DepthPro2Colorize:
@@ -566,6 +568,167 @@ class DepthPro2Save16:
         return {"ui": {"images": previews}}
 
 
+class DepthPro2SaveFloat:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "depth": ("DEPTHPRO2_DEPTH",),
+                "filename_prefix": ("STRING", {"default": "depthpro2/depth_float"}),
+                "format": (["exr", "tiff"], {"default": "exr"}),
+                "sky_value": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 100.0}),
+            },
+            "optional": {"focal_length_px": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.1})},
+        }
+
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+    FUNCTION = "save"
+    CATEGORY = "depth/DepthPro2"
+    DESCRIPTION = (
+        "Save metric depth in meters as 32-bit float for compositing (Nuke, Fusion, Blender): "
+        "single-channel EXR (channel Z, needs the optional OpenEXR package: pip install OpenEXR) "
+        "or float32 TIFF with no extra dependencies. Unlike the 16-bit node this is lossless and "
+        "stores true meters, not an inverse scale. sky_value replaces sky/invalid pixels with a "
+        "far distance (0 keeps infinity). Link focal_length_px from the estimate node to embed "
+        "it, with units and sky convention, in the file metadata. Shows an 8-bit preview."
+    )
+
+    def save(
+        self,
+        depth: torch.Tensor,
+        filename_prefix: str,
+        format: str,
+        sky_value: float,
+        focal_length_px: float | None = None,
+    ):
+        from PIL import Image
+
+        meters = depth.float().cpu().clone()
+        invalid = ~torch.isfinite(meters)
+        if sky_value > 0:
+            meters[invalid] = sky_value
+        else:
+            meters[torch.isnan(meters)] = float("inf")
+        sky_desc = f"{sky_value:g} m" if sky_value > 0 else "inf"
+        focal = float(focal_length_px) if focal_length_px else 0.0
+        height, width = meters.shape[-2:]
+        ext = ".exr" if format == "exr" else ".tif"
+        folder, filename, _, subfolder, _ = folder_paths.get_save_image_path(
+            filename_prefix, folder_paths.get_output_directory(), width, height
+        )
+        # get_save_image_path counts PNGs only; count our own format to avoid overwrites.
+        counter = len(list(Path(folder).glob(f"{filename}_*{ext}")))
+        if format == "exr":
+            try:
+                import Imath
+                import OpenEXR
+            except ImportError as e:
+                raise ImportError(
+                    "EXR export needs the OpenEXR package (pip install OpenEXR), "
+                    "or choose the tiff format."
+                ) from e
+        temp_dir = Path(folder_paths.get_temp_directory())
+        inverse = inverse_metric(depth)
+        scale = color_scale(inverse)
+        previews = []
+        for i, frame in enumerate(meters):
+            path = Path(folder) / f"{filename}_{counter:05d}{ext}"
+            if format == "exr":
+                header = OpenEXR.Header(width, height)
+                header["channels"] = {"Z": Imath.Channel(Imath.PixelType(Imath.PixelType.FLOAT))}
+                header["depthpro2_units"] = b"meters"
+                header["depthpro2_sky"] = sky_desc.encode()
+                if focal > 0:
+                    header["depthpro2_focal_px"] = f"{focal:.6g}".encode()
+                out = OpenEXR.OutputFile(str(path), header)
+                out.writePixels({"Z": frame.numpy().tobytes()})
+                out.close()
+            else:
+                from PIL.TiffImagePlugin import ImageFileDirectory_v2
+
+                info = ImageFileDirectory_v2()
+                info[65000] = "meters"
+                info[65001] = sky_desc
+                if focal > 0:
+                    info[65002] = f"{focal:.6g}"
+                Image.fromarray(frame.numpy()).save(path, tiffinfo=info)
+            preview_name = f"{filename}_{counter:05d}_float_preview.png"
+            preview = (inverse[i] / scale).clamp(0, 1).mul(255).round().to(torch.uint8).numpy()
+            Image.fromarray(preview).save(temp_dir / preview_name, compress_level=1)
+            previews.append({"filename": preview_name, "subfolder": "", "type": "temp"})
+            counter += 1
+        LOGGER.info("DepthPro2 float depth: %s, meters, sky = %s.", path, sky_desc)
+        return {"ui": {"images": previews}}
+
+
+class DepthPro2SavePLY:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "position": ("IMAGE",),
+                "valid": ("MASK",),
+                "filename_prefix": ("STRING", {"default": "depthpro2/points"}),
+            },
+            "optional": {"image": ("IMAGE",)},
+        }
+
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+    FUNCTION = "save"
+    CATEGORY = "depth/DepthPro2"
+    DESCRIPTION = (
+        "Write a metric point cloud (binary PLY, in meters) from the Position Pass outputs: "
+        "link position_xyz and valid; only valid points are written, sky and clipped pixels "
+        "are dropped. Link the original image to color the points. Coordinates are camera-space "
+        "(X right, Y down, Z forward) — flip Y in DCCs that expect Y up. Opens in MeshLab, "
+        "Blender and CloudCompare."
+    )
+
+    def save(
+        self,
+        position: torch.Tensor,
+        valid: torch.Tensor,
+        filename_prefix: str,
+        image: torch.Tensor | None = None,
+    ):
+        import numpy as np
+
+        if position.ndim != 4 or position.shape[-1] != 3:
+            raise ValueError("position must be the Position Pass position_xyz output (T, H, W, 3).")
+        if image is not None and image.shape[1:3] != position.shape[1:3]:
+            raise ValueError("image resolution must match the position pass resolution.")
+        height, width = position.shape[1:3]
+        folder, filename, _, _, _ = folder_paths.get_save_image_path(
+            filename_prefix, folder_paths.get_output_directory(), width, height
+        )
+        counter = len(list(Path(folder).glob(f"{filename}_*.ply")))
+        colored = image is not None
+        props = "property float x\nproperty float y\nproperty float z\n"
+        fields = [("x", "<f4"), ("y", "<f4"), ("z", "<f4")]
+        if colored:
+            props += "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+            fields += [("red", "u1"), ("green", "u1"), ("blue", "u1")]
+        for i in range(position.shape[0]):
+            mask = valid[i].bool()
+            points = position[i][mask].numpy().astype("<f4")
+            record = np.empty(len(points), dtype=np.dtype(fields))
+            record["x"], record["y"], record["z"] = points.T
+            if colored:
+                rgb = (image[i][mask].clamp(0, 1) * 255).round().to(torch.uint8).numpy()
+                record["red"], record["green"], record["blue"] = rgb.T
+            header = (
+                f"ply\nformat binary_little_endian 1.0\nelement vertex {len(points)}\n"
+                f"{props}end_header\n"
+            )
+            path = Path(folder) / f"{filename}_{counter:05d}.ply"
+            path.write_bytes(header.encode("ascii") + record.tobytes())
+            LOGGER.info("DepthPro2 PLY: %s (%d points, meters).", path, len(points))
+            counter += 1
+        return ()
+
+
 NODE_CLASS_MAPPINGS = {
     "DepthPro2Loader": DepthPro2Loader,
     "DepthPro2Estimate": DepthPro2Estimate,
@@ -574,6 +737,8 @@ NODE_CLASS_MAPPINGS = {
     "DepthPro2Colorize": DepthPro2Colorize,
     "DepthPro2PositionPass": DepthPro2PositionPass,
     "DepthPro2Save16": DepthPro2Save16,
+    "DepthPro2SaveFloat": DepthPro2SaveFloat,
+    "DepthPro2SavePLY": DepthPro2SavePLY,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "DepthPro2Loader": "DepthPro2 Loader",
@@ -583,4 +748,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DepthPro2Colorize": "DepthPro2 Colorize Depth",
     "DepthPro2PositionPass": "DepthPro2 Position Pass",
     "DepthPro2Save16": "DepthPro2 Save 16-bit Depth",
+    "DepthPro2SaveFloat": "DepthPro2 Save Float Depth",
+    "DepthPro2SavePLY": "DepthPro2 Save PLY Points",
 }
