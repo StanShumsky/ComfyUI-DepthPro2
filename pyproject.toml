@@ -5,7 +5,7 @@ version = "0.1.0"
 dependencies = ["timm>=1.0.27,<1.1", "huggingface_hub>=1.0", "safetensors"]
 
 [project.urls]
-Repository = "https://github.com/shumsky/ComfyUI-DepthPro2"
+Repository = "https://github.com/StanShumsky/ComfyUI-DepthPro2"
 
 [tool.comfy]
 PublisherId = ""
