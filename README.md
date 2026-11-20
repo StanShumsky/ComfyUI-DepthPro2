@@ -63,7 +63,7 @@ focal length, giving temporally steady depth. The visualization is normalized ov
 batch. Reduce `window`/`overlap` first if you run out of memory.
 - `mode`: `buffered` (each frame also sees later frames; `overlap` applies) or `unbuffered`
   (each frame predicted from itself and the frames before it — lower latency and memory,
-  `overlap` ignored), as in the upstream CLI.
+  `overlap` ignored).
 
 ### DepthPro2 Focal Length
 Converts a **physical** lens focal length (mm, as engraved on the lens) to pixels for a known
@@ -76,7 +76,7 @@ nodes; it overrides `focal_length_mm`. For phone photos and unknown cameras, kee
 35mm-equivalent `focal_length_mm` widget instead.
 
 ### DepthPro2 Colorize Depth
-Color preview of `depth_meters`, matching Apple's CLI: `turbo` (byte-identical LUT) maps dark
+Color preview of `depth_meters`: `turbo` (Apple's preview colormap) maps dark
 blue at infinitely far to red/white near; also `viridis`, `inferno`, `magma`, `plasma`, `gray`.
 The scale is fixed by the first frame's nearest point plus 20% headroom, so videos stay steady
 and points coming nearer later saturate. Outputs `depth_color` (IMAGE).
@@ -135,15 +135,13 @@ RUN_DP2_WEIGHT_TESTS=1 pytest -m integration   # end-to-end on real weights (S +
 ```
 
 Integration tests download into `$DP2_MODELS_DIR` (default: a temp dir) and run on ComfyUI's
-device selection (CUDA/MPS/CPU). Tests live in the repository but are excluded from the
-published registry archive via `.comfyignore`, as the registry docs recommend.
+device selection (CUDA/MPS/CPU).
 
 ## License
 
 - The node code in this repository is Apache-2.0 (see `LICENSE`).
-- The vendored [depth_pro_2/](depth_pro_2/) code is Apple's, redistributed under its
-  permissive sample-code license (see `depth_pro_2/LICENSE`); modifications here make
-  `av`/`pillow_heif` optional.
+- The bundled [depth_pro_2/](depth_pro_2/) code is Apple's, redistributed under its
+  permissive sample-code license (see `depth_pro_2/LICENSE`).
 - **Model weights are released under the Apple Machine Learning Research Model license
   (`LICENSE_MODEL`): non-commercial scientific research and academic use only.**
 
