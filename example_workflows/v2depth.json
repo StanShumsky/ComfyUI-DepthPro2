@@ -1,0 +1,261 @@
+{
+  "id": "depthpro2-v2depth",
+  "revision": 0,
+  "last_node_id": 8,
+  "last_link_id": 7,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "MarkdownNote",
+      "pos": [-480, 100],
+      "size": [420, 400],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "DepthPro2 — Video to Depth",
+      "properties": {},
+      "widgets_values": [
+        "## DepthPro2 — Video to Depth\n\nTemporally consistent metric depth for a video with [Apple Depth Pro 2](https://huggingface.co/apple/DepthPro2). Uses ComfyUI's built-in video nodes — keep ComfyUI up to date.\n\n**How it works**\n- Frames are processed jointly in overlapping windows and share one focal length, so depth stays steady from frame to frame.\n- `window`: frames attended together (default 16). `overlap`: frames shared between consecutive windows (default 4). Longer windows / larger overlap = steadier but slower.\n- `f_px`: `0` estimates one focal length from the first window.\n- `max_size`: cap the longest side; `0` = native resolution.\n\n**Out of memory?** Lower `window` (and `overlap` with it) first, then `max_size`, then switch to a smaller model (`depthpro2-s`).\n\n**Output**\n- `depth_image` is normalized over the whole batch, so brightness does not flicker between frames. The source fps is carried through to the saved video.\n- `depth_meters` carries raw metric depth (`inf` at sky) for downstream use.\n\nWeights are licensed for **non-commercial research only** (Apple AMLR)."
+      ]
+    },
+    {
+      "id": 2,
+      "type": "DepthPro2Loader",
+      "pos": [0, 100],
+      "size": [320, 106],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "DEPTHPRO2_MODEL",
+          "links": [1]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "DepthPro2Loader"
+      },
+      "widgets_values": ["depthpro2-s", "auto", "auto"]
+    },
+    {
+      "id": 3,
+      "type": "LoadVideo",
+      "pos": [0, 260],
+      "size": [320, 340],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "links": [2]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadVideo",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": ["example.mp4", "image"]
+    },
+    {
+      "id": 4,
+      "type": "GetVideoComponents",
+      "pos": [390, 330],
+      "size": [260, 126],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [3]
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": null
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "links": [4]
+        },
+        {
+          "name": "bit_depth",
+          "type": "COMBO",
+          "links": null
+        },
+        {
+          "name": "color_space",
+          "type": "COMBO",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GetVideoComponents",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 5,
+      "type": "DepthPro2Video",
+      "pos": [390, 100],
+      "size": [340, 180],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "DEPTHPRO2_MODEL",
+          "link": 1
+        },
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "depth_image",
+          "type": "IMAGE",
+          "links": [5, 7]
+        },
+        {
+          "name": "depth_meters",
+          "type": "DEPTHPRO2_DEPTH",
+          "links": null
+        },
+        {
+          "name": "focal_length_px",
+          "type": "FLOAT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "DepthPro2Video"
+      },
+      "widgets_values": [16, 4, 0.0, 0]
+    },
+    {
+      "id": 6,
+      "type": "CreateVideo",
+      "pos": [800, 100],
+      "size": [270, 100],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 5
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "link": 4,
+          "widget": {
+            "name": "fps"
+          }
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "shape": 7,
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "links": [6]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CreateVideo",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 7,
+      "type": "SaveVideo",
+      "pos": [1130, 100],
+      "size": [400, 350],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": 6
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "SaveVideo",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": ["depthpro2/video_depth", "auto", "auto"]
+    },
+    {
+      "id": 8,
+      "type": "PreviewImage",
+      "pos": [800, 260],
+      "size": [420, 340],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 7
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "PreviewImage",
+        "cnr_id": "comfy-core"
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [
+    [1, 2, 0, 5, 0, "DEPTHPRO2_MODEL"],
+    [2, 3, 0, 4, 0, "VIDEO"],
+    [3, 4, 0, 5, 1, "IMAGE"],
+    [4, 4, 2, 6, 1, "FLOAT"],
+    [5, 5, 0, 6, 0, "IMAGE"],
+    [6, 6, 0, 7, 0, "VIDEO"],
+    [7, 5, 0, 8, 0, "IMAGE"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.7,
+      "offset": [500, 0]
+    }
+  },
+  "version": 0.4
+}
