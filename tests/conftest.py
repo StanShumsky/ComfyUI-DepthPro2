@@ -51,6 +51,23 @@ def _install_stubs() -> None:
         "mps" if torch.backends.mps.is_available() else "cpu"
     )
     mm.soft_empty_cache = lambda: None
+    # Generous free memory: the auto max_size policy stays at native resolution in tests.
+    mm.get_free_memory = lambda dev=None: 1 << 40
+    mm.load_model_gpu = lambda patcher: patcher
+    mm.load_models_gpu = lambda models, memory_required=0, **kwargs: models
+    mm.loaded_models = lambda only_currently_used=False: []
+    mm.text_encoder_dtype = lambda device=None: torch.float16
+    mp = types.ModuleType("comfy.model_patcher")
+
+    class CoreModelPatcher:
+        """Stand-in for ComfyUI's CoreModelPatcher (weights stay put in tests)."""
+
+        def __init__(self, model, load_device, offload_device, size=0, fast_disk=False):
+            self.model = model
+            self.load_device = load_device
+            self.offload_device = offload_device
+
+    mp.CoreModelPatcher = CoreModelPatcher
     cu = types.ModuleType("comfy.utils")
 
     class ProgressBar:
@@ -62,10 +79,33 @@ def _install_stubs() -> None:
 
     cu.ProgressBar = ProgressBar
     comfy.model_management = mm
+    comfy.model_patcher = mp
     comfy.utils = cu
     sys.modules["comfy"] = comfy
     sys.modules["comfy.model_management"] = mm
+    sys.modules["comfy.model_patcher"] = mp
     sys.modules["comfy.utils"] = cu
+
+    try:
+        import tqdm.auto  # noqa: F401
+    except ImportError:
+        tqdm_mod = types.ModuleType("tqdm")
+        auto_mod = types.ModuleType("tqdm.auto")
+
+        class _Tqdm:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def update(self, n=1):
+                pass
+
+            def close(self):
+                pass
+
+        auto_mod.tqdm = _Tqdm
+        tqdm_mod.auto = auto_mod
+        sys.modules["tqdm"] = tqdm_mod
+        sys.modules["tqdm.auto"] = auto_mod
 
 
 _install_stubs()

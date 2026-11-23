@@ -136,10 +136,10 @@ def test_save_ply_roundtrip(nodes, wrapper, output_dir, make_batch):
 def test_fp8_stream_reads_dequantized_weight(nodes, make_batch):
     (wrapper,) = nodes.DepthPro2Loader().load("depthpro2-s", "fp8", "auto")
     net, device = wrapper["model"], wrapper["device"]
-    frames, _, _ = nodes._prepare_frames(make_batch(t=4), device, 0, 0.0)
+    frames, _, _ = nodes._prepare_frames(make_batch(t=4), 0, 0.0)
     stream = net.stream(window=4, mode="unbuffered")
     preds = []
     for frame in frames:
-        preds.extend(stream.step(frame))
+        preds.extend(stream.step(nodes.to_normalized_tensor(frame, device)))
     preds.extend(stream.flush())
     assert len(preds) == 4 and float(preds[0]["focallength_px"]) > 0

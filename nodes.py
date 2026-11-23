@@ -11,11 +11,13 @@ from pathlib import Path
 
 import torch
 from torch.nn import functional as F
-from safetensors.torch import load_file
+from safetensors import safe_open
 
 import folder_paths
 import comfy.model_management as mm
+import comfy.model_patcher
 from comfy.utils import ProgressBar
+from tqdm.auto import tqdm
 
 from .depth_pro_2 import PRESETS, DepthPro2
 from .depth_pro_2.model import to_normalized_tensor
@@ -148,13 +150,15 @@ def _check_weights(state_dict: dict[str, torch.Tensor], name: str) -> None:
         )
 
 
-def _load_repo_verified(repo_id: str, name: str) -> tuple[Path, dict[str, torch.Tensor]]:
-    """Load a downloaded model; if it is unreadable or corrupt, re-download it once."""
+def _load_repo_verified(
+    repo_id: str, name: str, dtype: torch.dtype
+) -> tuple[Path, dict[str, torch.Tensor]]:
+    """Load a downloaded model in ``dtype``; if it is unreadable or corrupt, re-download once."""
     last_error: Exception | None = None
     for attempt in range(2):
         local = _download_repo(repo_id, name, force=attempt == 1)
         try:
-            state_dict = _load_state_dict(local / "model.safetensors")
+            state_dict = _load_state_dict(local / "model.safetensors", dtype)
             _check_weights(state_dict, name)
             return local, state_dict
         except Exception as error:  # truncated safetensors raise their own error type
@@ -167,10 +171,42 @@ def _load_repo_verified(repo_id: str, name: str) -> tuple[Path, dict[str, torch.
     ) from last_error
 
 
-def _load_state_dict(path: Path) -> dict[str, torch.Tensor]:
+def _load_state_dict(path: Path, dtype: torch.dtype) -> dict[str, torch.Tensor]:
+    """Load the weights straight into ``dtype`` so no fp32 copy ever lives in RAM.
+
+    The native model loaders (MoGe, Depth Anything 3) build the model in the compute
+    dtype on the offload device; the fp32 file contents are read from the memory map
+    and converted tensor by tensor instead of being resident a second time.
+    """
     if path.suffix == ".safetensors":
-        return load_file(str(path))
-    return torch.load(path, map_location="cpu", weights_only=True)
+        state: dict[str, torch.Tensor] = {}
+        with safe_open(str(path), framework="pt") as f:
+            for key in f.keys():
+                value = f.get_tensor(key)
+                state[key] = value.to(dtype) if value.is_floating_point() else value
+        return state
+    state = torch.load(path, map_location="cpu", weights_only=True)
+    return {key: value.to(dtype) if value.is_floating_point() else value for key, value in state.items()}
+
+
+def _annotate_source(state_dict: dict[str, torch.Tensor], path: str) -> None:
+    """Tag the weights with their file path, for ComfyUI's fast-storage detection."""
+    try:
+        import comfy.storage
+
+        comfy.storage.annotate_state_dict(state_dict, path)
+    except Exception:
+        pass
+
+
+def _fast_disk(state_dict: dict[str, torch.Tensor]) -> bool:
+    """Whether the weights live on fast storage, as the native model loaders report it."""
+    try:
+        import comfy.storage
+
+        return bool(comfy.storage.state_dict_fast_disk(state_dict))
+    except Exception:
+        return False
 
 
 def _detect_preset(state_dict: dict[str, torch.Tensor]) -> str:
@@ -192,15 +228,19 @@ def _detect_preset(state_dict: dict[str, torch.Tensor]) -> str:
     return preset
 
 
-def _resolve_weights(name: str) -> tuple[dict, dict[str, torch.Tensor], dict[str, torch.Tensor] | None]:
-    """Return (config kwargs, state dict, focal state dict or None) for a model choice."""
+def _resolve_weights(
+    name: str, dtype: torch.dtype
+) -> tuple[dict, dict[str, torch.Tensor], dict[str, torch.Tensor] | None]:
+    """Return (config kwargs, state dict in ``dtype``, focal state dict or None)."""
     if name in HF_REPOS:
-        local, state_dict = _load_repo_verified(HF_REPOS[name], name)
+        local, state_dict = _load_repo_verified(HF_REPOS[name], name, dtype)
+        _annotate_source(state_dict, str(local / "model.safetensors"))
         config = json.loads((local / "config.json").read_text())
     else:
         path = _find_local_file(name)
-        state_dict = _load_state_dict(path)
+        state_dict = _load_state_dict(path, dtype)
         _check_weights(state_dict, name)
+        _annotate_source(state_dict, str(path))
         config_path = path.with_name("config.json")
         if config_path.exists():
             config = json.loads(config_path.read_text())
@@ -217,7 +257,10 @@ def _resolve_weights(name: str) -> tuple[dict, dict[str, torch.Tensor], dict[str
                 )
             }
     has_fov = any(key.startswith("fov.") for key in state_dict)
-    focal_state = None if has_fov else _load_repo_verified(FOCAL_REPO, "depthpro2-focal")[1]
+    focal_state = None
+    if not has_fov:
+        focal_local, focal_state = _load_repo_verified(FOCAL_REPO, "depthpro2-focal", dtype)
+        _annotate_source(focal_state, str(focal_local / "model.safetensors"))
     return config, state_dict, focal_state
 
 
@@ -235,39 +278,176 @@ def _cast_storage(model: torch.nn.Module, dtype: torch.dtype) -> None:
 
 def load_depthpro2(name: str, precision: str, device: str) -> dict:
     if device == "auto":
-        torch_device = mm.get_torch_device()
+        load_device = mm.get_torch_device()
     else:
-        torch_device = torch.device(device)
+        load_device = torch.device(device)
     if precision == "auto":
-        precision = "fp32" if torch_device.type == "cpu" else "bf16"
+        # ComfyUI's session dtype for auxiliary models, as the native MoGe / Depth
+        # Anything nodes use it (honors --fp16-text-enc & friends; fp8 text-enc flags
+        # fall back to fp16). CPU stays fp32: half-precision autocast is much slower
+        # there, as in Apple's reference loading.
+        if load_device.type == "cpu":
+            precision = "fp32"
+        else:
+            auto = mm.text_encoder_dtype(load_device)
+            precision = "bf16" if auto == torch.bfloat16 else "fp16"
 
-    config, state_dict, focal_state = _resolve_weights(name)
     compute_dtype = DTYPES["bf16" if precision == "fp8" else precision]
-    if precision == "fp8" and torch_device.type == "cpu":
+    if precision == "fp8" and load_device.type == "cpu":
         compute_dtype = torch.float32
+    config, state_dict, focal_state = _resolve_weights(name, compute_dtype)
 
+    # Build in system RAM and hand the weights to ComfyUI's model management (as the
+    # official MoGe nodes do): the model rides in the offload device until a run loads
+    # it onto the GPU, and is evicted again when other nodes need the VRAM. The storage
+    # is cast to the compute dtype before the load, so the low-precision copy is the
+    # only one in RAM (the native pattern: the model is built in the compute dtype on
+    # the offload device, never in fp32).
     model = DepthPro2(
         **{key: value for key, value in config.items() if key != "fov"},
         fov=focal_state is not None or any(k.startswith("fov.") for k in state_dict),
         precision=compute_dtype,
     )
-    if focal_state is not None:
-        state_dict.update({f"fov.{k}": v for k, v in focal_state.items()})
-    model.load_state_dict(state_dict, strict=True)
-    del state_dict
-
-    if precision == "fp8":
-        count = quantize_linears(model.encoder, compute_dtype)
-        LOGGER.info("DepthPro2: quantized %d linear layers to fp8.", count)
     if compute_dtype != torch.float32:
         # Store the autocast-covered parts in low precision; the heads run in float32.
         _cast_storage(model.encoder, compute_dtype)
         _cast_storage(model.decoder, compute_dtype)
         if model.fov is not None:
             _cast_storage(model.fov.trunk, compute_dtype)
+    if focal_state is not None:
+        state_dict.update({f"fov.{k}": v for k, v in focal_state.items()})
+    model.load_state_dict(state_dict, strict=True)
+    fast_disk = _fast_disk(state_dict)
+    del state_dict, focal_state
 
-    model.to(torch_device).eval()
-    return {"model": model, "device": torch_device, "name": name, "precision": precision}
+    if precision == "fp8":
+        count = quantize_linears(model.encoder, compute_dtype)
+        LOGGER.info("DepthPro2: quantized %d linear layers to fp8.", count)
+
+    model.eval()
+    patcher = comfy.model_patcher.CoreModelPatcher(
+        model,
+        load_device=load_device,
+        offload_device=torch.device("cpu"),
+        fast_disk=fast_disk,
+    )
+    return {
+        "model": model,
+        "patcher": patcher,
+        "device": load_device,
+        "name": name,
+        "precision": precision,
+    }
+
+
+# Largest inputs (megapixels) each preset processed without OOM on a 32 GiB card
+# (RTX 5090, bf16, clean session), where the driver used the full ~31.8 GiB. These
+# anchor both the "auto" max_size policy, which scales the cap with the VRAM actually
+# free at run time, and the activation estimate reserved through ComfyUI's model
+# management before the run. Local weight files of unknown preset use the
+# conservative boundary.
+AUTO_BOUNDARY_MPS = {
+    "depthpro2-s": 32.0,
+    "depthpro2-b": 24.0,
+    "depthpro2-l": 32.0,
+    "depthpro2-h": 32.0,
+}
+AUTO_BOUNDARY_UNKNOWN = 24.0
+# Extra driver memory per video window frame per input MP (bf16): buffered and
+# unbuffered windows both keep `window` frames' tokens in one cross-frame attention.
+VIDEO_WINDOW_COST = {
+    "depthpro2-s": 0.037,
+    "depthpro2-b": 0.074,
+    "depthpro2-l": 0.099,
+    "depthpro2-h": 0.123,
+}
+VIDEO_WINDOW_COST_UNKNOWN = 0.074
+
+
+def _window_boundary(name: str, window: int) -> float:
+    """The boundary MP with the per-window-frame cross-frame attention cost accounted for."""
+    boundary = AUTO_BOUNDARY_MPS.get(name, AUTO_BOUNDARY_UNKNOWN)
+    if window > 1:
+        cost = VIDEO_WINDOW_COST.get(name, VIDEO_WINDOW_COST_UNKNOWN)
+        boundary = boundary / (1.0 + cost * (window - 1) * boundary / AUTO_REF_FREE_GIB)
+    return boundary
+
+
+# Free VRAM (GiB) during the boundary runs: 32 GiB card minus the ~2 GiB baseline.
+AUTO_REF_FREE_GIB = 29.8
+# Headroom kept out of the free VRAM for allocator variance and session overhead.
+AUTO_MARGIN_GIB = 2.5
+MIN_AUTO_MPS = 2.0
+
+
+def _auto_max_size(model: dict, height: int, width: int, window: int = 1) -> int:
+    """The "auto" max_size policy: largest longest side that fits the free VRAM.
+
+    Returns 0 when the native resolution already fits (or on CPU/MPS, where there is
+    no VRAM budget to respect).
+    """
+    device = model["device"]
+    if device.type != "cuda":
+        return 0
+    boundary = _window_boundary(model["name"], window)
+    free_gib = mm.get_free_memory(device) / 2**30
+    if model["patcher"] not in mm.loaded_models():
+        # The weights are not on the GPU yet: account for them so the policy reads the
+        # same whether measured before or after the model load.
+        free_gib -= model["patcher"].model_size() / 2**30
+    budget = free_gib - AUTO_MARGIN_GIB
+    if budget <= 0.0:
+        raise RuntimeError(
+            f"DepthPro2: only {free_gib:.1f} GiB of VRAM is free; the model needs at "
+            f"least ~{AUTO_MARGIN_GIB + 1:.0f} GiB headroom. Free other models, choose a "
+            "smaller preset, or use the fp8 precision."
+        )
+    native_mps = height * width / 1e6
+    allowed_mps = boundary * budget / AUTO_REF_FREE_GIB
+    if allowed_mps >= native_mps:
+        return 0
+    longest, shortest = max(height, width), min(height, width)
+    side = (allowed_mps * 1e6 * longest / shortest) ** 0.5
+    min_side = (MIN_AUTO_MPS * 1e6 * longest / shortest) ** 0.5
+    return max(int(side // 32 * 32), int(min_side // 32 * 32))
+
+
+def _resolve_max_size(model: dict, image: torch.Tensor, max_size: int, window: int = 1) -> int:
+    """Widget value -> processing longest-side cap (0 = native resolution)."""
+    if max_size != 0:
+        return 0 if max_size < 0 else max_size
+    capped = _auto_max_size(model, *image.shape[1:3], window=window)
+    if capped > 0:
+        LOGGER.info(
+            "DepthPro2: auto resolution capped %dx%d to longest side %d to fit the free VRAM.",
+            image.shape[2], image.shape[1], capped,
+        )
+    return capped
+
+
+def _activation_bytes(model: dict, height: int, width: int, side: int, window: int = 1) -> int:
+    """Estimated activation VRAM (bytes) of one forward at the resolved processing size.
+
+    Anchored on the boundary runs (see AUTO_BOUNDARY_MPS): at the boundary MP the session
+    consumed the reference card's whole free VRAM, so the non-weight cost per MP is
+    (ref free - weights) / boundary. Activations scale linearly with the megapixels
+    (flash attention is linear in the token count), and the estimate is scaled by the
+    compute dtype versus the bf16 calibration.
+    """
+    device = model["device"]
+    if device.type != "cuda":
+        return 0
+    boundary = _window_boundary(model["name"], window)
+    longest = max(height, width)
+    if side > 0 and longest > side:
+        scale = side / longest
+        mps = height * width * scale * scale / 1e6
+    else:
+        mps = height * width / 1e6
+    weights_gib = model["patcher"].model_size() / 2**30
+    per_mp_gib = max(0.0, AUTO_REF_FREE_GIB - weights_gib) / boundary
+    itemsize = 4 if model["precision"] == "fp32" else 2
+    return int(per_mp_gib * mps * (itemsize / 2.0) * 2**30)
 
 
 def _focal_mm_to_px(focal_mm: float, height: int, width: int) -> float:
@@ -339,9 +519,14 @@ class DepthPro2FocalLength:
 
 
 def _prepare_frames(
-    images: torch.Tensor, device: torch.device, max_size: int, f_px: float
+    images: torch.Tensor, max_size: int, f_px: float
 ) -> tuple[list[torch.Tensor], float | None, float]:
-    """ComfyUI IMAGE batch (T, H, W, 3) float 0..1 -> normalized frame tensors and focal."""
+    """ComfyUI IMAGE batch (T, H, W, 3) float 0..1 -> CPU uint8 staging frames and focal.
+
+    The frames stay on the CPU; each one moves to and normalizes on the GPU as it is
+    consumed (the native per-chunk pattern: MoGe and Depth Anything keep the input batch
+    on the CPU and move only the active chunk), so a long batch never sits in VRAM.
+    """
     height, width = images.shape[1:3]
     scale = 1.0
     if max_size > 0 and max(height, width) > max_size:
@@ -351,12 +536,91 @@ def _prepare_frames(
         images = F.interpolate(
             images.permute(0, 3, 1, 2), size=(new_h, new_w), mode="bilinear", antialias=True
         ).permute(0, 2, 3, 1)
-    frames = [
-        to_normalized_tensor((frame.clamp(0, 1) * 255).round().to(torch.uint8).numpy(), device)
-        for frame in images
-    ]
+    frames = [(frame.clamp(0, 1) * 255).round().to(torch.uint8) for frame in images]
     focal = None if f_px <= 0 else f_px * scale
     return frames, focal, scale
+
+
+def _to_cpu(prediction: dict) -> None:
+    """Move a prediction off the GPU the moment it is final (the native per-chunk offload)."""
+    for key in ("inverse_depth", "depth"):
+        if prediction[key] is not None:
+            prediction[key] = prediction[key].detach().float().cpu()
+    if prediction["focallength_px"] is not None:
+        prediction["focallength_px"] = prediction["focallength_px"].detach().float().cpu()
+
+
+def _run_inference(
+    model: dict,
+    image: torch.Tensor,
+    f_px: float,
+    max_size: int,
+    desc: str,
+    window: int = 1,
+    mode: str | None = None,
+    overlap: int = 0,
+) -> tuple[list[dict], float]:
+    """Run inference over the batch at the resolved processing size.
+
+    Follows the native ComfyUI model-management pattern: the estimated activation VRAM is
+    reserved through ``load_models_gpu`` before the weights load (the frame-interpolation,
+    Trellis and TripoSplat nodes all do this), so other resident models are evicted in
+    time instead of mid-run out-of-memory errors; the input frames stay on the CPU and
+    move to the GPU one at a time; and every prediction is moved back to the CPU the
+    moment it is final. If a frame still fails with a CUDA out-of-memory, the processing
+    size halves and retries, so a busy session degrades in detail instead of crashing.
+    """
+    net, device = model["model"], model["device"]
+    height, width = image.shape[1:3]
+    side = _resolve_max_size(model, image, max_size, window=window)
+    longest = max(height, width)
+    attempts = 0
+    while True:
+        if device.type != "cpu":
+            mm.load_models_gpu(
+                [model["patcher"]],
+                memory_required=_activation_bytes(model, height, width, side, window=window),
+            )
+        frames, focal, scale = _prepare_frames(image, side, f_px)
+        progress = ProgressBar(len(frames))
+        bar = tqdm(total=len(frames), desc=desc)
+        try:
+            predictions = []
+            if mode is None:
+                for frame in frames:
+                    prediction = net.infer(to_normalized_tensor(frame, device), f_px=focal)
+                    _to_cpu(prediction)
+                    predictions.append(prediction)
+                    progress.update(1)
+                    bar.update(1)
+            else:
+                for prediction in net.infer_video(
+                    (to_normalized_tensor(frame, device) for frame in frames),
+                    window=window, overlap=overlap, f_px=focal, mode=mode,
+                ):
+                    _to_cpu(prediction)
+                    predictions.append(prediction)
+                    progress.update(1)
+                    bar.update(1)
+            bar.close()
+            return predictions, scale
+        except torch.cuda.OutOfMemoryError:
+            bar.close()
+            del frames
+            mm.soft_empty_cache()
+            attempts += 1
+            if attempts >= 3:
+                raise RuntimeError(
+                    "DepthPro2: out of GPU memory even at the smallest processing "
+                    "size. Free VRAM (other loaded models), choose a smaller preset, "
+                    "use the fp8 precision, or set a smaller max_size."
+                ) from None
+            current = side if side > 0 else longest
+            side = max(256, current // (2**attempts))
+            LOGGER.warning(
+                "DepthPro2: out of memory at longest side %d; retrying at %d.",
+                current, side,
+            )
 
 
 def _normalize_inverse_depth(inverse_depth: torch.Tensor) -> torch.Tensor:
@@ -416,8 +680,12 @@ class DepthPro2Loader:
     DESCRIPTION = (
         "Load Apple Depth Pro 2. Preset names download weights from Hugging Face into "
         "models/depthpro2 on first use; local .safetensors/.pt files in that folder are also "
-        "listed. fp8 stores encoder weights as float8 with per-channel scales (about half the "
-        "memory of bf16); the focal-length estimator stays in high precision."
+        "listed. auto uses ComfyUI's session dtype for auxiliary models (fp16 on CUDA, as in "
+        "the native MoGe/Depth Anything nodes; honors --fp16-text-enc/--bf16-text-enc), fp16 is "
+        "the native default and bf16 Apple's training precision; fp8 stores encoder weights as "
+        "float8 with per-channel scales (about half the memory of bf16). The model is managed "
+        "by ComfyUI's model management: it rides in RAM and is evicted from the GPU when other "
+        "nodes need the VRAM."
     )
 
     def load(self, model: str, precision: str, device: str):
@@ -432,13 +700,13 @@ class DepthPro2Estimate:
                 "model": ("DEPTHPRO2_MODEL",),
                 "image": ("IMAGE",),
                 "focal_length_mm": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.5}),
-                "max_size": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 32}),
+                "max_size": ("INT", {"default": 0, "min": -1, "max": 16384, "step": 32}),
             },
             "optional": {"focal_length_px": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.1})},
         }
 
     RETURN_TYPES = ("IMAGE", "DEPTHPRO2_DEPTH", "FLOAT", "MASK")
-    RETURN_NAMES = ("depth_image", "depth_meters", "focal_length_px", "sky")
+    RETURN_NAMES = ("depth_image", "depth_meters", "focal_length_px", "sky_mask")
     FUNCTION = "estimate"
     CATEGORY = "depth/DepthPro2"
     DESCRIPTION = (
@@ -448,9 +716,15 @@ class DepthPro2Estimate:
         "holdouts. focal_length_mm is the lens focal length "
         "as a 35mm-equivalent (e.g. 24, 35, 50 — the EXIF FocalLengthIn35mmFilm value); 0 "
         "estimates it with the focal-length model. Depth in meters scales linearly with focal "
-        "length. max_size caps the longest side processed (0 = native resolution, sharpest edges). "
-        "For physical mm with a known camera sensor, link the Focal Length node's focal_length_px "
-        "output to the optional focal_length_px input; it overrides focal_length_mm."
+        "length. max_size: 0 (default) picks the largest resolution that fits the free VRAM "
+        "automatically, -1 runs at native resolution (sharpest edges, may OOM on very large "
+        "images), any positive value caps the longest side processed; the output is always "
+        "upsampled back to the input size. The estimated processing memory is reserved through "
+        "ComfyUI's model management before the run, so other loaded models are evicted when "
+        "needed; if a frame still runs out of memory, the node retries at half the processing "
+        "size instead of crashing. For physical mm with a known "
+        "camera sensor, link the Focal Length node's focal_length_px output to the optional "
+        "focal_length_px input; it overrides focal_length_mm."
     )
 
     def estimate(
@@ -461,14 +735,8 @@ class DepthPro2Estimate:
         max_size: int,
         focal_length_px: float | None = None,
     ):
-        net, device = model["model"], model["device"]
         f_px = focal_length_px or _focal_mm_to_px(focal_length_mm, *image.shape[1:3])
-        frames, focal, scale = _prepare_frames(image, device, max_size, f_px)
-        progress = ProgressBar(len(frames))
-        predictions = []
-        for frame in frames:
-            predictions.append(net.infer(frame, f_px=focal))
-            progress.update(1)
+        predictions, scale = _run_inference(model, image, f_px, max_size, "DepthPro2 estimate")
         mm.soft_empty_cache()
         return _depth_outputs(predictions, tuple(image.shape[1:3]), scale)
 
@@ -483,14 +751,14 @@ class DepthPro2Video:
                 "window": ("INT", {"default": 16, "min": 1, "max": 64}),
                 "overlap": ("INT", {"default": 4, "min": 0, "max": 63}),
                 "focal_length_mm": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.5}),
-                "max_size": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 32}),
+                "max_size": ("INT", {"default": 0, "min": -1, "max": 16384, "step": 32}),
                 "mode": (["buffered", "unbuffered"], {"default": "buffered"}),
             },
             "optional": {"focal_length_px": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.1})},
         }
 
     RETURN_TYPES = ("IMAGE", "DEPTHPRO2_DEPTH", "FLOAT", "MASK")
-    RETURN_NAMES = ("depth_image", "depth_meters", "focal_length_px", "sky")
+    RETURN_NAMES = ("depth_image", "depth_meters", "focal_length_px", "sky_mask")
     FUNCTION = "estimate"
     CATEGORY = "depth/DepthPro2"
     DESCRIPTION = (
@@ -500,7 +768,13 @@ class DepthPro2Video:
         "of memory. depth_image is normalized over the whole batch so brightness is steady "
         "across frames. buffered lets each frame also see later frames (overlap applies); "
         "unbuffered predicts each frame from itself and the frames before it, at lower latency "
-        "and memory (overlap is ignored). Link the Focal Length node's focal_length_px output "
+        "and memory (overlap is ignored). max_size: 0 (default) picks the largest resolution "
+        "that fits the free VRAM automatically (accounting for the window), -1 runs at native "
+        "resolution, any positive value caps the longest side processed; the output is always "
+        "upsampled back to the input size. Frames are staged on the CPU and moved to the GPU "
+        "one window at a time, and the estimated processing memory is reserved through "
+        "ComfyUI's model management before the run, so other loaded models are evicted when "
+        "needed. Link the Focal Length node's focal_length_px output "
         "to the optional focal_length_px input to override focal_length_mm with a sensor-aware "
         "physical focal length."
     )
@@ -518,16 +792,11 @@ class DepthPro2Video:
     ):
         if mode == "buffered" and overlap >= window:
             raise ValueError("overlap must be smaller than window.")
-        net, device = model["model"], model["device"]
         f_px = focal_length_px or _focal_mm_to_px(focal_length_mm, *images.shape[1:3])
-        frames, focal, scale = _prepare_frames(images, device, max_size, f_px)
-        progress = ProgressBar(len(frames))
-        predictions = []
-        for prediction in net.infer_video(
-            iter(frames), window=window, overlap=overlap, f_px=focal, mode=mode
-        ):
-            predictions.append(prediction)
-            progress.update(1)
+        predictions, scale = _run_inference(
+            model, images, f_px, max_size, "DepthPro2 video",
+            window=window, mode=mode, overlap=overlap,
+        )
         mm.soft_empty_cache()
         image, depth, focal_out, sky = _depth_outputs(predictions, tuple(images.shape[1:3]), scale)
         # One shared range keeps the visualization temporally steady.

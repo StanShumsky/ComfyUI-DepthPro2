@@ -52,11 +52,27 @@ def test_focal_length_node(nodes, make_batch):
 
 def test_prepare_frames_resize_and_focal(nodes, make_batch):
     batch = make_batch(t=2, h=64, w=96)
-    frames, focal, scale = nodes._prepare_frames(batch, torch.device("cpu"), 48, 500.0)
+    frames, focal, scale = nodes._prepare_frames(batch, 48, 500.0)
     assert scale == 0.5 and focal == 250.0
-    assert len(frames) == 2 and frames[0].shape == (3, 32, 48)
-    frames, focal, scale = nodes._prepare_frames(batch, torch.device("cpu"), 0, 0.0)
-    assert scale == 1.0 and focal is None and frames[0].shape == (3, 64, 96)
+    # CPU uint8 staging: the frames stay on the CPU until consumed (the native pattern).
+    assert len(frames) == 2 and frames[0].shape == (32, 48, 3)
+    assert frames[0].dtype == torch.uint8 and frames[0].device.type == "cpu"
+    frames, focal, scale = nodes._prepare_frames(batch, 0, 0.0)
+    assert scale == 1.0 and focal is None and frames[0].shape == (64, 96, 3)
+
+
+def test_normalize_uint8_tensor(nodes):
+    u8 = (torch.rand(8, 12, 3) * 255.0).round().to(torch.uint8)
+    x = nodes.to_normalized_tensor(u8, torch.device("cpu"))
+    assert x.shape == (3, 8, 12) and x.dtype == torch.float32 and x.device.type == "cpu"
+    mean = torch.tensor((0.485, 0.456, 0.406)).view(3, 1, 1)
+    std = torch.tensor((0.229, 0.224, 0.225)).view(3, 1, 1)
+    expected = (u8.permute(2, 0, 1).float() / 255.0 - mean) / std
+    assert torch.allclose(x, expected, atol=1e-6)
+    with pytest.raises(TypeError):
+        nodes.to_normalized_tensor(torch.rand(3, 8, 12), torch.device("cpu"))
+    with pytest.raises(TypeError):
+        nodes.to_normalized_tensor(torch.rand(8, 12, 3), torch.device("cpu"))
 
 
 def test_normalize_inverse_depth(nodes):

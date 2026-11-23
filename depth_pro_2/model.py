@@ -196,15 +196,30 @@ def _normalization(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
     return mean, std
 
 
-def to_normalized_tensor(image: np.ndarray, device: torch.device) -> torch.Tensor:
-    """Normalize an RGB ``(H, W, 3)`` uint8 array to a ``(3, H, W)`` float tensor on ``device``."""
-    if image.dtype != np.uint8 or image.ndim != 3 or image.shape[-1] != 3:
-        raise TypeError(
-            "transform takes an RGB uint8 (H, W, 3) array, e.g. from load_rgb, "
-            f"got {image.dtype} {tuple(image.shape)}."
+def to_normalized_tensor(
+    image: np.ndarray | torch.Tensor, device: torch.device
+) -> torch.Tensor:
+    """Normalize an RGB uint8 ``(H, W, 3)`` array or tensor to a ``(3, H, W)`` float tensor on ``device``."""
+    if isinstance(image, torch.Tensor):
+        if image.dtype != torch.uint8 or image.ndim != 3 or image.shape[-1] != 3:
+            raise TypeError(
+                "transform takes an RGB uint8 (H, W, 3) tensor, e.g. a frame of a ComfyUI "
+                f"IMAGE batch clamped to 0..1, got {image.dtype} {tuple(image.shape)}."
+            )
+        x = (
+            image.permute(2, 0, 1)
+            .contiguous()
+            .to(device, dtype=torch.float32, non_blocking=True)
+            .div_(255.0)
         )
-    x = torch.from_numpy(np.ascontiguousarray(image)).to(device, non_blocking=True)
-    x = x.permute(2, 0, 1).contiguous().to(torch.float32).div_(255.0)
+    else:
+        if image.dtype != np.uint8 or image.ndim != 3 or image.shape[-1] != 3:
+            raise TypeError(
+                "transform takes an RGB uint8 (H, W, 3) array, e.g. from load_rgb, "
+                f"got {image.dtype} {tuple(image.shape)}."
+            )
+        x = torch.from_numpy(np.ascontiguousarray(image)).to(device, non_blocking=True)
+        x = x.permute(2, 0, 1).contiguous().to(torch.float32).div_(255.0)
     mean, std = _normalization(device)
     return x.sub_(mean).div_(std)
 
@@ -232,6 +247,12 @@ class DepthPro2(nn.Module, PyTorchModelHubMixin):
         self.head = create_inverse_depth_head(self.decoder.dim_out)
         self.fov = FOVEstimator(precision) if fov else None
         self.precision = precision
+
+    @property
+    def weight_device(self) -> torch.device:
+        """The device the weights live on. (Not ``device``: ComfyUI's model management
+        uses that attribute as a mutable load-state marker.)"""
+        return next(self.parameters()).device
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *, subfolder=None, **kwargs):
@@ -286,8 +307,9 @@ class DepthPro2(nn.Module, PyTorchModelHubMixin):
         """Infer inverse depth, metric depth and focal length at the native input resolution.
 
         Args:
-            x: Normalized image ``(3, H, W)`` or clip ``(T, 3, H, W)``. A clip's frames attend to
-                each other and share one focal length, so pass unrelated photos one at a time.
+            x: Normalized image ``(3, H, W)`` or clip ``(T, 3, H, W)`` on any device, moved to
+                the model's device if needed. A clip's frames attend to each other and share one
+                focal length, so pass unrelated photos one at a time.
             f_px: Focal length in pixels of ``x``, e.g. from EXIF; one estimate per clip by default.
 
         Returns:
@@ -303,6 +325,8 @@ class DepthPro2(nn.Module, PyTorchModelHubMixin):
                 "infer takes a float (3, H, W) or (T, 3, H, W) tensor from transform(image), "
                 f"got {x.dtype} {tuple(x.shape)}."
             )
+        if x.device != self.weight_device:
+            x = x.to(self.weight_device, non_blocking=True)
         is_image = x.ndim == 3
         if is_image:
             x = x.unsqueeze(0)
@@ -360,7 +384,8 @@ class DepthPro2(nn.Module, PyTorchModelHubMixin):
         """Infer depth for a video, one prediction per frame, in order.
 
         Args:
-            frames: Normalized frames ``(3, H, W)``, read lazily.
+            frames: Normalized frames ``(3, H, W)`` on any device, read lazily and moved to
+                the model's device as they are consumed.
             window: Frames attended together: the clip length (buffered) or the cache size,
                 the current frame included (unbuffered).
             overlap: Frames shared by consecutive clips, fewer than ``window``; ``buffered`` only.
@@ -372,6 +397,13 @@ class DepthPro2(nn.Module, PyTorchModelHubMixin):
         Yields:
             ``inverse_depth`` and ``depth`` in meters, both ``(H, W)``, and ``focallength_px``.
         """
+        device = self.weight_device
+
+        def _on_device(frames):
+            for frame in frames:
+                yield frame if frame.device == device else frame.to(device, non_blocking=True)
+
+        frames = _on_device(frames)
         if f_px is None and self.fov is not None:
             # Unlike a live feed, a file can look ahead: every frame gets the first window's focal.
             frames = iter(frames)
