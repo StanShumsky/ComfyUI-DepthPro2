@@ -1,0 +1,772 @@
+{
+  "revision": 0,
+  "last_node_id": 200,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 200,
+      "type": "64c85b6f-e8c6-4b4b-9c07-0f2533783e6b",
+      "pos": [
+        -1200,
+        -300
+      ],
+      "size": [
+        430,
+        330
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "video",
+          "name": "video",
+          "type": "VIDEO",
+          "link": null
+        },
+        {
+          "localized_name": "model",
+          "name": "model",
+          "type": "COMBO",
+          "widget": {
+            "name": "model"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "window",
+          "name": "window",
+          "type": "INT",
+          "widget": {
+            "name": "window"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "focal_length_mm",
+          "name": "focal_length_mm",
+          "type": "FLOAT",
+          "widget": {
+            "name": "focal_length_mm"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "max_size",
+          "name": "max_size",
+          "type": "INT",
+          "widget": {
+            "name": "max_size"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "depth_image",
+          "name": "depth_image",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "localized_name": "depth_video",
+          "name": "depth_video",
+          "type": "VIDEO",
+          "links": []
+        },
+        {
+          "localized_name": "depth_meters",
+          "name": "depth_meters",
+          "type": "DEPTHPRO2_DEPTH",
+          "links": []
+        },
+        {
+          "localized_name": "sky_mask",
+          "name": "sky_mask",
+          "type": "MASK",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "2",
+            "model"
+          ],
+          [
+            "5",
+            "window"
+          ],
+          [
+            "5",
+            "focal_length_mm"
+          ],
+          [
+            "5",
+            "max_size"
+          ]
+        ],
+        "cnr_id": "ComfyUI-DepthPro2",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [],
+      "title": "Video Depth Estimation (Depth Pro 2)"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "64c85b6f-e8c6-4b4b-9c07-0f2533783e6b",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 7,
+          "lastLinkId": 214,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Video Depth Estimation (Depth Pro 2)",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -1200.0,
+            -80.0,
+            167.3,
+            168
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            320.0,
+            -80.0,
+            167.3,
+            148
+          ]
+        },
+        "inputs": [
+          {
+            "id": "5ad53b21-0b83-4906-bcb0-a3f1ccbabbc9",
+            "name": "video",
+            "type": "VIDEO",
+            "linkIds": [
+              201
+            ],
+            "localized_name": "video",
+            "pos": [
+              -1057.0,
+              -56.0
+            ]
+          },
+          {
+            "id": "07b451c9-0838-42f4-8e16-655b9dd39037",
+            "name": "model",
+            "type": "COMBO",
+            "linkIds": [
+              202
+            ],
+            "localized_name": "model",
+            "pos": [
+              -1057.0,
+              -36.0
+            ]
+          },
+          {
+            "id": "0c0ac994-a563-45d0-a947-5940b95cc027",
+            "name": "window",
+            "type": "INT",
+            "linkIds": [
+              205
+            ],
+            "localized_name": "window",
+            "pos": [
+              -1057.0,
+              -16.0
+            ]
+          },
+          {
+            "id": "28a29b1b-c615-4823-8820-37628c6ae043",
+            "name": "focal_length_mm",
+            "type": "FLOAT",
+            "linkIds": [
+              206
+            ],
+            "localized_name": "focal_length_mm",
+            "pos": [
+              -1057.0,
+              4.0
+            ]
+          },
+          {
+            "id": "ba911428-e0a0-4023-a972-75a0df89cffe",
+            "name": "max_size",
+            "type": "INT",
+            "linkIds": [
+              207
+            ],
+            "localized_name": "max_size",
+            "pos": [
+              -1057.0,
+              24.0
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "26cae664-d05d-4f90-8cf0-82c59eba3fda",
+            "name": "depth_image",
+            "type": "IMAGE",
+            "linkIds": [
+              210
+            ],
+            "localized_name": "depth_image",
+            "pos": [
+              344.0,
+              -56.0
+            ]
+          },
+          {
+            "id": "abe5cb0d-44f2-480e-b3ff-e8984808114b",
+            "name": "depth_video",
+            "type": "VIDEO",
+            "linkIds": [
+              211
+            ],
+            "localized_name": "depth_video",
+            "pos": [
+              344.0,
+              -36.0
+            ]
+          },
+          {
+            "id": "96750718-6c6e-4af6-b85e-e20e10902f1d",
+            "name": "depth_meters",
+            "type": "DEPTHPRO2_DEPTH",
+            "linkIds": [
+              212
+            ],
+            "localized_name": "depth_meters",
+            "pos": [
+              344.0,
+              -16.0
+            ]
+          },
+          {
+            "id": "d2af63e4-1861-4c3e-a314-a02d90242d6d",
+            "name": "sky_mask",
+            "type": "MASK",
+            "linkIds": [
+              213
+            ],
+            "localized_name": "sky_mask",
+            "pos": [
+              344.0,
+              4.0
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 2,
+            "type": "DepthPro2Loader",
+            "pos": [
+              -960,
+              100
+            ],
+            "size": [
+              270,
+              140
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "name": "model",
+                "type": "COMBO",
+                "link": 202,
+                "widget": {
+                  "name": "model"
+                },
+                "localized_name": "model"
+              },
+              {
+                "name": "precision",
+                "type": "COMBO",
+                "link": null,
+                "widget": {
+                  "name": "precision"
+                },
+                "localized_name": "precision"
+              },
+              {
+                "name": "device",
+                "type": "COMBO",
+                "link": null,
+                "widget": {
+                  "name": "device"
+                },
+                "localized_name": "device"
+              }
+            ],
+            "outputs": [
+              {
+                "name": "model",
+                "type": "DEPTHPRO2_MODEL",
+                "links": [
+                  203
+                ],
+                "localized_name": "model"
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "DepthPro2Loader",
+              "cnr_id": "ComfyUI-DepthPro2",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "depthpro2-s",
+              "auto",
+              "auto"
+            ]
+          },
+          {
+            "id": 4,
+            "type": "GetVideoComponents",
+            "pos": [
+              -960,
+              -60
+            ],
+            "size": [
+              270,
+              100
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "name": "video",
+                "type": "VIDEO",
+                "link": 201,
+                "localized_name": "video"
+              }
+            ],
+            "outputs": [
+              {
+                "name": "images",
+                "type": "IMAGE",
+                "links": [
+                  204
+                ],
+                "localized_name": "images"
+              },
+              {
+                "name": "audio",
+                "type": "AUDIO",
+                "links": [],
+                "localized_name": "audio"
+              },
+              {
+                "name": "fps",
+                "type": "FLOAT",
+                "links": [
+                  208
+                ],
+                "localized_name": "fps"
+              },
+              {
+                "name": "bit_depth",
+                "type": "COMBO",
+                "links": [],
+                "localized_name": "bit_depth"
+              },
+              {
+                "name": "color_space",
+                "type": "COMBO",
+                "links": [],
+                "localized_name": "color_space"
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GetVideoComponents",
+              "cnr_id": "comfy-core",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": []
+          },
+          {
+            "id": 5,
+            "type": "DepthPro2Video",
+            "pos": [
+              -540,
+              -140
+            ],
+            "size": [
+              270,
+              220
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "name": "model",
+                "type": "DEPTHPRO2_MODEL",
+                "link": 203,
+                "localized_name": "model"
+              },
+              {
+                "name": "images",
+                "type": "IMAGE",
+                "link": 204,
+                "localized_name": "images"
+              },
+              {
+                "name": "window",
+                "type": "INT",
+                "link": 205,
+                "widget": {
+                  "name": "window"
+                },
+                "localized_name": "window"
+              },
+              {
+                "name": "overlap",
+                "type": "INT",
+                "link": null,
+                "widget": {
+                  "name": "overlap"
+                },
+                "localized_name": "overlap"
+              },
+              {
+                "name": "focal_length_mm",
+                "type": "FLOAT",
+                "link": 206,
+                "widget": {
+                  "name": "focal_length_mm"
+                },
+                "localized_name": "focal_length_mm"
+              },
+              {
+                "name": "max_size",
+                "type": "INT",
+                "link": 207,
+                "widget": {
+                  "name": "max_size"
+                },
+                "localized_name": "max_size"
+              },
+              {
+                "name": "mode",
+                "type": "COMBO",
+                "link": null,
+                "widget": {
+                  "name": "mode"
+                },
+                "localized_name": "mode"
+              },
+              {
+                "name": "focal_length_px",
+                "type": "FLOAT",
+                "link": null,
+                "widget": {
+                  "name": "focal_length_px"
+                },
+                "localized_name": "focal_length_px"
+              }
+            ],
+            "outputs": [
+              {
+                "name": "depth_image",
+                "type": "IMAGE",
+                "links": [
+                  209,
+                  210
+                ],
+                "localized_name": "depth_image"
+              },
+              {
+                "name": "depth_meters",
+                "type": "DEPTHPRO2_DEPTH",
+                "links": [
+                  212
+                ],
+                "localized_name": "depth_meters"
+              },
+              {
+                "name": "focal_length_px",
+                "type": "FLOAT",
+                "links": [],
+                "localized_name": "focal_length_px"
+              },
+              {
+                "name": "sky_mask",
+                "type": "MASK",
+                "links": [
+                  213
+                ],
+                "localized_name": "sky_mask"
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "DepthPro2Video",
+              "cnr_id": "ComfyUI-DepthPro2",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              16,
+              4,
+              0.0,
+              0,
+              "buffered",
+              0.0
+            ]
+          },
+          {
+            "id": 6,
+            "type": "CreateVideo",
+            "pos": [
+              -160,
+              -60
+            ],
+            "size": [
+              270,
+              180
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "name": "images",
+                "type": "IMAGE",
+                "link": 209,
+                "localized_name": "images"
+              },
+              {
+                "name": "fps",
+                "type": "FLOAT",
+                "link": 208,
+                "widget": {
+                  "name": "fps"
+                },
+                "localized_name": "fps"
+              },
+              {
+                "name": "audio",
+                "type": "AUDIO",
+                "link": null,
+                "localized_name": "audio"
+              },
+              {
+                "name": "bit_depth",
+                "type": "COMBO",
+                "link": null,
+                "widget": {
+                  "name": "bit_depth"
+                },
+                "localized_name": "bit_depth"
+              },
+              {
+                "name": "color_space",
+                "type": "COMBO",
+                "link": null,
+                "widget": {
+                  "name": "color_space"
+                },
+                "localized_name": "color_space"
+              },
+              {
+                "name": "chroma_subsampling",
+                "type": "COMBO",
+                "link": null,
+                "widget": {
+                  "name": "chroma_subsampling"
+                },
+                "localized_name": "chroma_subsampling"
+              },
+              {
+                "name": "codec",
+                "type": "COMBO",
+                "link": null,
+                "widget": {
+                  "name": "codec"
+                },
+                "localized_name": "codec"
+              }
+            ],
+            "outputs": [
+              {
+                "name": "video",
+                "type": "VIDEO",
+                "links": [
+                  211
+                ],
+                "localized_name": "video"
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CreateVideo",
+              "cnr_id": "comfy-core",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              30.0,
+              "auto",
+              "sRGB",
+              "auto",
+              "none"
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 201,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 4,
+            "target_slot": 0,
+            "type": "VIDEO"
+          },
+          {
+            "id": 202,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 2,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 203,
+            "origin_id": 2,
+            "origin_slot": 0,
+            "target_id": 5,
+            "target_slot": 0,
+            "type": "DEPTHPRO2_MODEL"
+          },
+          {
+            "id": 204,
+            "origin_id": 4,
+            "origin_slot": 0,
+            "target_id": 5,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 205,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 5,
+            "target_slot": 2,
+            "type": "INT"
+          },
+          {
+            "id": 206,
+            "origin_id": -10,
+            "origin_slot": 3,
+            "target_id": 5,
+            "target_slot": 4,
+            "type": "FLOAT"
+          },
+          {
+            "id": 207,
+            "origin_id": -10,
+            "origin_slot": 4,
+            "target_id": 5,
+            "target_slot": 5,
+            "type": "INT"
+          },
+          {
+            "id": 208,
+            "origin_id": 4,
+            "origin_slot": 2,
+            "target_id": 6,
+            "target_slot": 1,
+            "type": "FLOAT"
+          },
+          {
+            "id": 209,
+            "origin_id": 5,
+            "origin_slot": 0,
+            "target_id": 6,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 210,
+            "origin_id": 5,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 211,
+            "origin_id": 6,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 1,
+            "type": "VIDEO"
+          },
+          {
+            "id": 212,
+            "origin_id": 5,
+            "origin_slot": 1,
+            "target_id": -20,
+            "target_slot": 2,
+            "type": "DEPTHPRO2_DEPTH"
+          },
+          {
+            "id": 213,
+            "origin_id": 5,
+            "origin_slot": 3,
+            "target_id": -20,
+            "target_slot": 3,
+            "type": "MASK"
+          }
+        ],
+        "extra": {},
+        "category": "Preprocessors/Depth",
+        "description": "Estimates temporally consistent metric depth in meters from an input video using Apple Depth Pro 2, outputting preview frames, a depth video, raw metric depth and a sky mask."
+      }
+    ]
+  },
+  "extra": {}
+}
