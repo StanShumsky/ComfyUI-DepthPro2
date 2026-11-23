@@ -940,7 +940,10 @@ class DepthPro2Colorize(io.ComfyNode):
             ),
             inputs=[
                 DEPTHPRO2_DEPTH.Input("depth"),
-                io.Combo.Input("colormap", options=list(COLORMAPS), default="turbo"),
+                io.Combo.Input("colormap", options=list(COLORMAPS), default="turbo",
+                               tooltip="turbo is Apple's preview map (dark blue = infinitely far, "
+                                       "red/white = near); the others are standard names; gray is the "
+                                       "same scale in grayscale (white near, black far)."),
             ],
             outputs=[io.Image.Output(id="depth_color", display_name="depth_color")],
         )
@@ -1074,7 +1077,10 @@ class DepthPro2SaveFloat(io.ComfyNode):
             inputs=[
                 DEPTHPRO2_DEPTH.Input("depth"),
                 io.String.Input("filename_prefix", default="depthpro2/depth_float"),
-                io.Combo.Input("format", options=["exr", "tiff"], default="exr"),
+                io.Combo.Input("format", options=["exr", "tiff"], default="exr",
+                               tooltip="Both are lossless 32-bit float in meters. exr needs the optional "
+                                       "OpenEXR package (pip install OpenEXR); tiff has no extra "
+                                       "dependencies."),
                 io.Float.Input("sky_value", default=0.0, min=0.0, step=100.0, advanced=True,
                                tooltip="Replace sky/invalid pixels with this far distance (0 keeps infinity)."),
                 io.Float.Input("focal_length_px", default=0.0, min=0.0, step=0.1, optional=True,
