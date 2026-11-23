@@ -156,7 +156,7 @@
       "properties": {
         "Node name for S&R": "DepthPro2Video"
       },
-      "widgets_values": [16, 4, 0.0, 0, "buffered", 0.0]
+      "widgets_values": [16, 4, true, 0.0, 0, "buffered", 0.0]
     },
     {
       "id": 6,

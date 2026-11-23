@@ -66,6 +66,9 @@ Each image of the batch is processed independently (use this for unrelated photo
 Frames are processed jointly in overlapping windows (`window`, `overlap`) and share one
 focal length, giving temporally steady depth. The visualization is normalized over the whole
 batch. Reduce `window`/`overlap` first if you run out of memory.
+- `estimate_focal_length` (toggle, on by default): same as the Estimate node — with it on, `0` in
+  `focal_length_mm` (and no linked `focal_length_px`) estimates the focal length from the first
+  window; with it off, an explicit focal length is required and a `ValueError` is raised without one.
 - `mode`: `buffered` (each frame also sees later frames; `overlap` applies) or `unbuffered`
   (each frame predicted from itself and the frames before it — lower latency and memory,
   `overlap` ignored).

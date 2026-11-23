@@ -5,7 +5,7 @@
   "nodes": [
     {
       "id": 100,
-      "type": "dc10fe7c-fcd9-4524-bd3a-74b4f0d30025",
+      "type": "e30b5b40-e32a-4640-b9b8-044556feb9ee",
       "pos": [
         -1000,
         -320
@@ -31,6 +31,15 @@
           "localized_name": "source_image",
           "name": "source_image",
           "type": "IMAGE",
+          "link": null
+        },
+        {
+          "localized_name": "estimate_focal_length",
+          "name": "estimate_focal_length",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "estimate_focal_length"
+          },
           "link": null
         },
         {
@@ -86,6 +95,10 @@
           ],
           [
             "4",
+            "estimate_focal_length"
+          ],
+          [
+            "4",
             "focal_length_mm"
           ],
           [
@@ -111,12 +124,12 @@
   "definitions": {
     "subgraphs": [
       {
-        "id": "dc10fe7c-fcd9-4524-bd3a-74b4f0d30025",
+        "id": "e30b5b40-e32a-4640-b9b8-044556feb9ee",
         "version": 1,
         "state": {
           "lastGroupId": 0,
           "lastNodeId": 8,
-          "lastLinkId": 111,
+          "lastLinkId": 112,
           "lastRerouteId": 0
         },
         "revision": 0,
@@ -142,7 +155,7 @@
         },
         "inputs": [
           {
-            "id": "6270b393-5ba3-4364-ac48-3c230cdfe6c8",
+            "id": "a0faf6db-cace-4843-9bc5-bc3891a9f5ee",
             "name": "model",
             "type": "COMBO",
             "linkIds": [
@@ -155,7 +168,7 @@
             ]
           },
           {
-            "id": "ff1bfe3d-6b13-4632-8606-10dce0793714",
+            "id": "fb42c09d-60a0-43ae-a1e4-263e27d1c43e",
             "name": "source_image",
             "type": "IMAGE",
             "linkIds": [
@@ -168,7 +181,20 @@
             ]
           },
           {
-            "id": "7e79a5b0-c522-422c-a2b6-a484ccbed1c0",
+            "id": "c1d3252c-6062-4915-8d9b-d903447bbee6",
+            "name": "estimate_focal_length",
+            "type": "BOOLEAN",
+            "linkIds": [
+              111
+            ],
+            "localized_name": "estimate_focal_length",
+            "pos": [
+              -857.0,
+              -76.0
+            ]
+          },
+          {
+            "id": "41b3a46e-9f70-43b9-8e4d-95dbd51ffac1",
             "name": "focal_length_mm",
             "type": "FLOAT",
             "linkIds": [
@@ -177,11 +203,11 @@
             "localized_name": "focal_length_mm",
             "pos": [
               -857.0,
-              -76.0
+              -56.0
             ]
           },
           {
-            "id": "1ca45f13-02c1-4695-804c-7f2ee6da6bce",
+            "id": "1f533953-26b3-441b-96b7-6a3ce34b4f65",
             "name": "max_size",
             "type": "INT",
             "linkIds": [
@@ -190,13 +216,13 @@
             "localized_name": "max_size",
             "pos": [
               -857.0,
-              -56.0
+              -36.0
             ]
           }
         ],
         "outputs": [
           {
-            "id": "eb0b2216-3a26-461e-b24b-5a4dbea4acc3",
+            "id": "bfa7aab0-773e-453e-a91b-c841693f99f4",
             "name": "depth_image",
             "type": "IMAGE",
             "linkIds": [
@@ -209,7 +235,7 @@
             ]
           },
           {
-            "id": "8376ad4e-4e99-4137-9b87-6af35be4e57b",
+            "id": "b27bcb1e-f2e0-41a8-93bc-a2ab2558da42",
             "name": "depth_color",
             "type": "IMAGE",
             "linkIds": [
@@ -222,7 +248,7 @@
             ]
           },
           {
-            "id": "e91637c9-b617-4df8-815e-3e13365d2994",
+            "id": "c814f0f1-1ef3-476d-ba32-afd1b3d0cfb7",
             "name": "depth_meters",
             "type": "DEPTHPRO2_DEPTH",
             "linkIds": [
@@ -235,7 +261,7 @@
             ]
           },
           {
-            "id": "8c98d5c3-5f58-4cb4-ac9d-a3561b67af0c",
+            "id": "ad5cf18f-b781-49b4-8660-390b9948f38f",
             "name": "sky_mask",
             "type": "MASK",
             "linkIds": [
@@ -350,7 +376,7 @@
               {
                 "name": "estimate_focal_length",
                 "type": "BOOLEAN",
-                "link": null,
+                "link": 111,
                 "widget": {
                   "name": "estimate_focal_length"
                 },
@@ -521,7 +547,7 @@
           {
             "id": 104,
             "origin_id": -10,
-            "origin_slot": 2,
+            "origin_slot": 3,
             "target_id": 4,
             "target_slot": 3,
             "type": "FLOAT"
@@ -529,10 +555,18 @@
           {
             "id": 105,
             "origin_id": -10,
-            "origin_slot": 3,
+            "origin_slot": 4,
             "target_id": 4,
             "target_slot": 4,
             "type": "INT"
+          },
+          {
+            "id": 111,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 4,
+            "target_slot": 2,
+            "type": "BOOLEAN"
           },
           {
             "id": 106,

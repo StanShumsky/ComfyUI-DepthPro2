@@ -851,8 +851,11 @@ class DepthPro2Video(io.ComfyNode):
             description=(
                 "Temporally consistent depth for a video batch: frames are processed jointly in "
                 "overlapping windows and share one focal length. focal_length_mm is the 35mm-equivalent "
-                "focal length (0 estimates it from the first window). Lower window/overlap if you run out "
-                "of memory. depth_image is normalized over the whole batch so brightness is steady "
+                "focal length; 0 estimates it from the first window, as long as the 'Estimate focal "
+                "length' toggle (on by default) is on — with it off, an explicit focal length is "
+                "required (focal_length_mm or a linked focal_length_px) and a ValueError is raised "
+                "without one. Lower window/overlap if you run out of "
+                "memory. depth_image is normalized over the whole batch so brightness is steady "
                 "across frames. buffered lets each frame also see later frames (overlap applies); "
                 "unbuffered predicts each frame from itself and the frames before it, at lower latency "
                 "and memory (overlap is ignored). max_size: 0 (default) picks the largest resolution "
@@ -873,8 +876,15 @@ class DepthPro2Video(io.ComfyNode):
                              tooltip="Frames attended together; lower it if you run out of memory."),
                 io.Int.Input("overlap", default=4, min=0, max=63, advanced=True,
                              tooltip="Frames shared by consecutive clips (buffered mode only)."),
+                io.Boolean.Input("estimate_focal_length", default=True,
+                                 tooltip="Let the model estimate the focal length from the first window "
+                                         "when none is given (focal_length_mm is 0 and focal_length_px is "
+                                         "not linked). Off: an explicit focal length is required "
+                                         "(focal_length_mm or a linked focal_length_px) and a ValueError "
+                                         "is raised without one."),
                 io.Float.Input("focal_length_mm", default=0.0, min=0.0, step=0.5,
-                               tooltip="35mm-equivalent focal length; 0 estimates it from the first window."),
+                               tooltip="35mm-equivalent focal length; 0 estimates it from the first window "
+                                       "(while 'Estimate focal length' is on)."),
                 io.Int.Input("max_size", default=0, min=-1, max=16384, step=32,
                              tooltip="0 (default) picks the largest resolution that fits the free VRAM "
                                      "(accounting for the window); -1 native; positive caps the longest "
@@ -900,11 +910,18 @@ class DepthPro2Video(io.ComfyNode):
 
     @classmethod
     def execute(cls, model: dict, images: torch.Tensor, window: int, overlap: int,
-                focal_length_mm: float, max_size: int, mode: str = "buffered",
+                estimate_focal_length: bool, focal_length_mm: float, max_size: int,
+                mode: str = "buffered",
                 focal_length_px: float | None = None) -> io.NodeOutput:
         if mode == "buffered" and overlap >= window:
             raise ValueError("overlap must be smaller than window.")
         f_px = focal_length_px or _focal_mm_to_px(focal_length_mm, *images.shape[1:3])
+        if f_px <= 0 and not estimate_focal_length:
+            raise ValueError(
+                "DepthPro2 video: no focal length is set (focal_length_mm is 0 and "
+                "focal_length_px is not linked) and 'Estimate focal length' is off. Set "
+                "focal_length_mm or link focal_length_px, or re-enable the toggle."
+            )
         predictions, scale = _run_inference(
             model, images, f_px, max_size, "DepthPro2 video",
             window=window, mode=mode, overlap=overlap,
