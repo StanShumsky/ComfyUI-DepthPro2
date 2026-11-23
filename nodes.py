@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
+import shutil
 from pathlib import Path
 
 import torch
@@ -44,28 +46,125 @@ ARCH_BY_SHAPE = {
 }
 
 
-def _download_repo(repo_id: str, name: str) -> Path:
+def _model_dirs() -> list[Path]:
+    """Folders searched for weights, in priority order; the first one is where downloads go."""
+    dirs: list[Path] = [Path(p) for p in folder_paths.get_folder_paths("depthpro2")]
+    if MODELS_DIR not in dirs:
+        dirs.append(MODELS_DIR)
+    unique: list[Path] = []
+    for d in dirs:
+        if d not in unique:
+            unique.append(d)
+    return unique
+
+
+def _find_model_dir(name: str) -> Path | None:
+    """The folder of an already downloaded model, searching every model dir."""
+    for base in _model_dirs():
+        if (base / name / "model.safetensors").exists():
+            return base / name
+    return None
+
+
+def _purge_model(name: str) -> None:
+    """Delete every cached copy of a model, including Hugging Face's resume metadata."""
+    for base in _model_dirs():
+        folder = base / name
+        if folder.exists():
+            LOGGER.warning("DepthPro2: removing %s", folder)
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+def _download_repo(repo_id: str, name: str, force: bool = False) -> Path:
     from huggingface_hub import snapshot_download
 
-    local = MODELS_DIR / name
+    if force:
+        _purge_model(name)
+    else:
+        found = _find_model_dir(name)
+        if found is not None:
+            return found
+    local = _model_dirs()[0] / name
+    local.mkdir(parents=True, exist_ok=True)
+    LOGGER.info("Downloading %s to %s", repo_id, local)
+    snapshot_download(
+        repo_id=repo_id,
+        allow_patterns=["config.json", "model.safetensors", "LICENSE"],
+        local_dir=str(local),
+        force_download=force,
+    )
     if not (local / "model.safetensors").exists():
-        LOGGER.info("Downloading %s to %s", repo_id, local)
-        snapshot_download(
-            repo_id=repo_id,
-            allow_patterns=["config.json", "model.safetensors", "LICENSE"],
-            local_dir=str(local),
-        )
+        raise FileNotFoundError(f"Download of {repo_id} did not produce {local / 'model.safetensors'}.")
     return local
 
 
 def _local_weight_files() -> list[str]:
-    if not MODELS_DIR.exists():
-        return []
-    files = []
-    for path in sorted(MODELS_DIR.rglob("*")):
-        if path.suffix in (".safetensors", ".pt") and path.is_file():
-            files.append(str(path.relative_to(MODELS_DIR)))
+    files: list[str] = []
+    for base in _model_dirs():
+        if not base.exists():
+            continue
+        for path in sorted(base.rglob("*")):
+            if path.suffix not in (".safetensors", ".pt") or not path.is_file():
+                continue
+            rel = path.relative_to(base)
+            # Downloads of the presets (depthpro2-s/model.safetensors, ...) and the focal
+            # estimator are already offered by name or loaded automatically.
+            if ".cache" in rel.parts or rel.parts[0] in (*HF_REPOS, "depthpro2-focal"):
+                continue
+            if str(rel) not in files:
+                files.append(str(rel))
     return files
+
+
+def _find_local_file(name: str) -> Path:
+    for base in _model_dirs():
+        if (base / name).is_file():
+            return base / name
+    raise FileNotFoundError(
+        f"Weight file {name!r} not found in any of: {[str(d) for d in _model_dirs()]}"
+    )
+
+
+def _check_weights(state_dict: dict[str, torch.Tensor], name: str) -> None:
+    """Raise if the weights are visibly broken, e.g. a truncated or zero-filled download.
+
+    Such a file still loads with strict=True (all keys and shapes are there) but predicts
+    garbage, typically a black depth image, so it is caught here instead.
+    """
+    nonfinite, zeros = [], []
+    for key, value in state_dict.items():
+        if not value.is_floating_point() or value.numel() <= 100:
+            continue
+        if not torch.isfinite(value).all():
+            nonfinite.append(key)
+        elif not value.any():
+            zeros.append(key)
+    if nonfinite or len(zeros) >= 3:
+        bad = (nonfinite + zeros)[:3]
+        raise RuntimeError(
+            f"{name}: weights look corrupt ({len(nonfinite)} tensors with NaN/inf, "
+            f"{len(zeros)} all-zero tensors, e.g. {bad}). The file is probably an incomplete "
+            "download."
+        )
+
+
+def _load_repo_verified(repo_id: str, name: str) -> tuple[Path, dict[str, torch.Tensor]]:
+    """Load a downloaded model; if it is unreadable or corrupt, re-download it once."""
+    last_error: Exception | None = None
+    for attempt in range(2):
+        local = _download_repo(repo_id, name, force=attempt == 1)
+        try:
+            state_dict = _load_state_dict(local / "model.safetensors")
+            _check_weights(state_dict, name)
+            return local, state_dict
+        except Exception as error:  # truncated safetensors raise their own error type
+            last_error = error
+            if attempt == 0:
+                LOGGER.warning("DepthPro2: %s; re-downloading %s.", error, name)
+    raise RuntimeError(
+        f"{name} is still unusable after a fresh download from {repo_id}: {last_error}. "
+        f"Check free disk space in {_model_dirs()[0]} and your connection."
+    ) from last_error
 
 
 def _load_state_dict(path: Path) -> dict[str, torch.Tensor]:
@@ -93,17 +192,15 @@ def _detect_preset(state_dict: dict[str, torch.Tensor]) -> str:
     return preset
 
 
-def _resolve_weights(name: str) -> tuple[dict, dict[str, torch.Tensor], Path | None]:
-    """Return (config kwargs, state dict, focal weights path or None) for a model choice."""
+def _resolve_weights(name: str) -> tuple[dict, dict[str, torch.Tensor], dict[str, torch.Tensor] | None]:
+    """Return (config kwargs, state dict, focal state dict or None) for a model choice."""
     if name in HF_REPOS:
-        local = _download_repo(HF_REPOS[name], name)
+        local, state_dict = _load_repo_verified(HF_REPOS[name], name)
         config = json.loads((local / "config.json").read_text())
-        state_dict = _load_state_dict(local / "model.safetensors")
     else:
-        path = MODELS_DIR / name
-        if not path.exists():
-            raise FileNotFoundError(f"Weight file not found: {path}")
+        path = _find_local_file(name)
         state_dict = _load_state_dict(path)
+        _check_weights(state_dict, name)
         config_path = path.with_name("config.json")
         if config_path.exists():
             config = json.loads(config_path.read_text())
@@ -120,8 +217,8 @@ def _resolve_weights(name: str) -> tuple[dict, dict[str, torch.Tensor], Path | N
                 )
             }
     has_fov = any(key.startswith("fov.") for key in state_dict)
-    focal_path = None if has_fov else _download_repo(FOCAL_REPO, "depthpro2-focal") / "model.safetensors"
-    return config, state_dict, focal_path
+    focal_state = None if has_fov else _load_repo_verified(FOCAL_REPO, "depthpro2-focal")[1]
+    return config, state_dict, focal_state
 
 
 def _cast_storage(model: torch.nn.Module, dtype: torch.dtype) -> None:
@@ -144,18 +241,18 @@ def load_depthpro2(name: str, precision: str, device: str) -> dict:
     if precision == "auto":
         precision = "fp32" if torch_device.type == "cpu" else "bf16"
 
-    config, state_dict, focal_path = _resolve_weights(name)
+    config, state_dict, focal_state = _resolve_weights(name)
     compute_dtype = DTYPES["bf16" if precision == "fp8" else precision]
     if precision == "fp8" and torch_device.type == "cpu":
         compute_dtype = torch.float32
 
     model = DepthPro2(
         **{key: value for key, value in config.items() if key != "fov"},
-        fov=focal_path is not None or any(k.startswith("fov.") for k in state_dict),
+        fov=focal_state is not None or any(k.startswith("fov.") for k in state_dict),
         precision=compute_dtype,
     )
-    if focal_path is not None:
-        state_dict.update({f"fov.{k}": v for k, v in _load_state_dict(focal_path).items()})
+    if focal_state is not None:
+        state_dict.update({f"fov.{k}": v for k, v in focal_state.items()})
     model.load_state_dict(state_dict, strict=True)
     del state_dict
 

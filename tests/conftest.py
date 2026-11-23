@@ -23,6 +23,8 @@ def _install_stubs() -> None:
         "DP2_MODELS_DIR", str(Path(tempfile.gettempdir()) / "dp2-models")
     )
     folder_paths.add_model_folder_path = lambda *a, **k: None
+    # Real ComfyUI returns [] for unregistered folder names; downloads go to MODELS_DIR.
+    folder_paths.get_folder_paths = lambda name: []
     folder_paths.get_output_directory = lambda: STATE["output_dir"]
 
     def get_temp_directory():
