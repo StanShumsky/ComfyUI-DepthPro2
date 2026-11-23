@@ -535,6 +535,7 @@ class DepthPro2FocalLength(io.ComfyNode):
             node_id="DepthPro2FocalLength",
             display_name="DepthPro2 Focal Length",
             category=CATEGORY,
+            search_aliases=["focal length", "focal", "lens", "sensor", "35mm equivalent"],
             description=(
                 "Convert a physical lens focal length (mm, as engraved on the lens) to pixels for a "
                 "known sensor size, for cine/mirrorless cameras (ARRI, Blackmagic, Sony...). Enter the "
@@ -956,6 +957,7 @@ class DepthPro2Colorize(io.ComfyNode):
             node_id="DepthPro2Colorize",
             display_name="DepthPro2 Colorize Depth",
             category=CATEGORY,
+            search_aliases=["colorize", "colormap", "depth color", "turbo", "depth preview"],
             description=(
                 "Color preview of metric depth, as in Apple's CLI: turbo maps dark blue at infinitely "
                 "far to red/white near. The scale is fixed by the first frame's nearest point plus 20% "
@@ -987,6 +989,7 @@ class DepthPro2PositionPass(io.ComfyNode):
             node_id="DepthPro2PositionPass",
             display_name="DepthPro2 Position Pass",
             category=CATEGORY,
+            search_aliases=["position pass", "point cloud", "unproject", "backproject", "3d points"],
             description=(
                 "Camera-space position pass in meters: X right, Y down, Z along the viewing direction, "
                 "back-projected from metric depth with focal_length_px (link it from the estimate node) "
@@ -1040,6 +1043,7 @@ class DepthPro2Save16(io.ComfyNode):
             display_name="DepthPro2 Save 16-bit Depth",
             category=CATEGORY,
             is_output_node=True,
+            search_aliases=["save depth", "16-bit", "depth png", "depthpro2"],
             description=(
                 "Save inverse metric depth as 16-bit grayscale PNGs (white near, black infinitely far) "
                 "on the color preview's scale, for compositing tools: read as raw data (Raw in Nuke, "
@@ -1090,6 +1094,7 @@ class DepthPro2SaveFloat(io.ComfyNode):
             display_name="DepthPro2 Save Float Depth",
             category=CATEGORY,
             is_output_node=True,
+            search_aliases=["save depth", "float depth", "exr", "tiff", "z depth"],
             description=(
                 "Save metric depth in meters as 32-bit float for compositing (Nuke, Fusion, Blender): "
                 "single-channel EXR (channel Z, needs the optional OpenEXR package: pip install OpenEXR) "
@@ -1189,6 +1194,7 @@ class DepthPro2SavePLY(io.ComfyNode):
             display_name="DepthPro2 Save PLY",
             category=CATEGORY,
             is_output_node=True,
+            search_aliases=["save ply", "point cloud", "pointcloud", "points", "depthpro2"],
             description=(
                 "Write a metric point cloud (binary PLY, in meters) from the Position Pass outputs: "
                 "link position_xyz and valid; only valid points are written, sky and clipped pixels "
