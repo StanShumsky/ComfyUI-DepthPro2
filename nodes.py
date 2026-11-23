@@ -136,19 +136,25 @@ def _find_local_file(name: str) -> Path:
 
 
 def _corrupt_safetensors(message: str, path: str, incomplete: bool = True) -> ValueError:
-    """The native corrupt-file diagnostic (comfy.utils), with the file path, so the UI
-    shows the same wording for this pack's weights as for the native models'."""
-    if incomplete:
-        hint = (
-            "The safetensors file is corrupt/incomplete. Check the file size and make sure "
-            "you have copied/downloaded it correctly."
-        )
-    else:
-        hint = (
-            "The safetensors file is corrupt or invalid. Make sure this is actually a "
-            "safetensors file and not a ckpt or pt or other filetype."
-        )
-    return ValueError(f"{message}\n\nFile path: {path}\n\n{hint}")
+    """The native corrupt-file diagnostic, with the file path, so the UI shows the same
+    wording for this pack's weights as for the native models' (e.g. a truncated download
+    is reported exactly as ComfyUI reports one for the built-in loaders). The wording is
+    sourced from comfy.utils so it can never drift from what ComfyUI itself reports."""
+    try:
+        from comfy.utils import _incomplete_safetensors_error, _invalid_safetensors_error
+    except ImportError:  # outside ComfyUI (unit tests); wording kept in sync with comfy.utils
+        if incomplete:
+            hint = (
+                "The safetensors file is corrupt/incomplete. Check the file size and make sure "
+                "you have copied/downloaded it correctly."
+            )
+        else:
+            hint = (
+                "The safetensors file is corrupt or invalid. Make sure this is actually a "
+                "safetensors file and not a ckpt or pt or other filetype."
+            )
+        return ValueError(f"{message}\n\nFile path: {path}\n\n{hint}")
+    return (_incomplete_safetensors_error if incomplete else _invalid_safetensors_error)(message, path)
 
 
 def _check_weights(state_dict: dict[str, torch.Tensor], name: str, path: str) -> None:
