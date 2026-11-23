@@ -1,7 +1,8 @@
 [project]
 name = "comfyui-depthpro2"
 description = "Apple Depth Pro 2 metric monocular depth nodes: custom loader with bf16/fp16/fp8 weights, per-image and temporally consistent video depth."
-version = "0.3.0"
+version = "0.4.0"
+requires-python = ">=3.9"
 license = { file = "LICENSE" }
 dependencies = ["timm>=1.0.27,<1.1", "huggingface_hub>=1.0", "safetensors"]
 classifiers = [
@@ -17,6 +18,30 @@ Repository = "https://github.com/StanShumsky/ComfyUI-DepthPro2"
 PublisherId = "shumsky"
 DisplayName = "ComfyUI-DepthPro2"
 Icon = "https://raw.githubusercontent.com/StanShumsky/ComfyUI-DepthPro2/main/icon.png"
+# V3 nodes (comfy_api.latest) need >=0.3.48, subgraph blueprints >=0.3.67, and the
+# search_aliases field >=0.11.0; the newest of the three is the real floor.
+requires-comfyui = ">=0.11.0"
+
+# Registry/manager-side model installation, alongside the in-node auto-download.
+[[tool.comfy.Models]]
+location = "depthpro2"
+model_url = "https://huggingface.co/apple/DepthPro2-S"
+
+[[tool.comfy.Models]]
+location = "depthpro2"
+model_url = "https://huggingface.co/apple/DepthPro2-B"
+
+[[tool.comfy.Models]]
+location = "depthpro2"
+model_url = "https://huggingface.co/apple/DepthPro2-L"
+
+[[tool.comfy.Models]]
+location = "depthpro2"
+model_url = "https://huggingface.co/apple/DepthPro2-H"
+
+[[tool.comfy.Models]]
+location = "depthpro2"
+model_url = "https://huggingface.co/apple/DepthPro2-focal"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
