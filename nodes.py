@@ -384,19 +384,27 @@ def load_depthpro2(name: str, precision: str, device: str) -> dict:
     }
 
 
-# Largest inputs (megapixels) each preset processed without OOM on a 32 GiB card
-# (RTX 5090, bf16, clean session), where the driver used the full ~31.8 GiB. These
-# anchor both the "auto" max_size policy, which scales the cap with the VRAM actually
-# free at run time, and the activation estimate reserved through ComfyUI's model
-# management before the run. Local weight files of unknown preset use the
-# conservative boundary.
+# Boundary MP per preset: the input size at which one bf16 image forward consumes the
+# whole free VRAM of the reference card (32 GiB, ~29.8 GiB free). Derived analytically
+# from the architecture (stage-by-stage live-tensor accounting: ViT token sequence, the
+# 4-level reassembly pyramid, the DPT decoder fusions, the fp32 inverse-depth head) in
+# scripts/derive_boundaries.py, whose single correction factor (1.74x, for cudnn
+# workspaces, autocast accumulation and allocator variance) is fitted to the one
+# reliable peak measurement on file (L: 24 GiB torch peak at 16 MP). The derived
+# boundaries cross-check against the other observations: S predicts 17.0 GiB at 32 MP
+# vs ~19.4 GiB reported (-12%, hence the floor below the 51.4 MP derivation), and B
+# derives 32.3 MP vs its observed OOM window of 24-32 MP (hence 28). H shares L's
+# decoder/head and takes the extra headroom for its 1.63 GiB of weights. These anchor
+# both the "auto" max_size policy, which scales the cap with the VRAM actually free at
+# run time, and the activation estimate reserved through ComfyUI's model management
+# before the run. Local weight files of unknown preset use the conservative boundary.
 AUTO_BOUNDARY_MPS = {
-    "depthpro2-s": 32.0,
-    "depthpro2-b": 24.0,
-    "depthpro2-l": 32.0,
-    "depthpro2-h": 32.0,
+    "depthpro2-s": 48.0,
+    "depthpro2-b": 28.0,
+    "depthpro2-l": 18.0,
+    "depthpro2-h": 16.0,
 }
-AUTO_BOUNDARY_UNKNOWN = 24.0
+AUTO_BOUNDARY_UNKNOWN = 16.0
 # Extra driver memory per video window frame per input MP (bf16): buffered and
 # unbuffered windows both keep `window` frames' tokens in one cross-frame attention.
 VIDEO_WINDOW_COST = {
