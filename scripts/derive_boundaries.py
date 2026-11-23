@@ -1,7 +1,7 @@
 """Derive the AUTO_BOUNDARY_MPS table analytically (no GPU needed).
 
 Boundary MP = the input size at which one bf16 image forward consumes the whole free VRAM
-of the reference card (32 GiB 5090, ~2 GiB baseline -> 29.8 GiB free). The per-MP cost is
+of the reference card (a 32 GiB consumer card, ~2 GiB baseline -> 29.8 GiB free). The per-MP cost is
 modeled stage by stage from the architecture (encoder token sequence, the 4-level reassembly
 pyramid, the DPT decoder fusions, the fp32 inverse-depth head); a single global correction
 factor absorbs what static accounting cannot see (cudnn workspaces, autocast accumulation,

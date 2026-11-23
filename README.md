@@ -35,14 +35,27 @@ Restart ComfyUI. Weights download automatically from Hugging Face into
 the shared 94 MB focal estimator). You can also drop your own `.safetensors` / `.pt` files
 into that folder — the size is auto-detected, or read from a `config.json` next to the file.
 
+## Quick start
+
+1. Restart ComfyUI and drag [example_workflows/i2depth.json](example_workflows/i2depth.json)
+   onto the canvas (or Workflow → Open).
+2. Pick a preset in the Loader — S is smallest and fastest, H+ is largest and sharpest.
+   Weights download on the first run.
+3. Set the lens focal length on the Estimate node: the 35mm-equivalent in `focal_length_mm`
+   (EXIF has it as `FocalLengthIn35mmFilm`), or leave both focal inputs at 0 and let the
+   model estimate it.
+4. Queue the prompt. `depth_image` is the preview, `depth_meters` the metric depth tensor.
+
 ## Nodes
+
+Ten nodes in two families: **estimation** (Loader, Estimate Depth, Video Depth, Focal
+Length) and **export** (Colorize, Position Pass, Save 16-bit, Save Float, Save PLY).
 
 ### DepthPro2 Loader
 - `model`: `depthpro2-s/b/l/h` (auto-download) or any local weight file in `models/depthpro2`.
 - `precision`: `auto`, `bf16`, `fp16`, `fp32`, `fp8`.
-- `device`: `auto` (ComfyUI's device policy for auxiliary models, as in the native
-  MoGe/Depth Anything loaders — honors `--gpu-only`, falls back to the CPU on machines
-  without usable VRAM), `cuda`, `mps`, `cpu`.
+- `device`: `auto` (ComfyUI's device policy for auxiliary models — honors `--gpu-only`,
+  falls back to the CPU on machines without usable VRAM), `cuda`, `mps`, `cpu`.
 
 ### DepthPro2 Estimate Depth
 Each image of the batch is processed independently (use this for unrelated photos).
@@ -54,7 +67,10 @@ Each image of the batch is processed independently (use this for unrelated photo
   toggle is on). Depth in meters scales linearly with focal length — provide it when you know it.
 - `focal_length_px` (optional input): overrides `focal_length_mm` when linked — use the
   Focal Length node below for physical mm with a known camera sensor.
-- `max_size`: cap the longest side processed (`0` = native resolution, sharpest edges).
+- `max_size`: `0` (default) picks the largest resolution that fits the free VRAM,
+  `-1` runs at native resolution (sharpest edges, may OOM on very large images), any
+  positive value caps the longest side processed. The output is always upsampled back
+  to the input size.
 - Outputs:
   - `depth_image` (IMAGE): normalized inverse depth, near white / far black, for preview or
     ControlNet-style conditioning.
@@ -72,6 +88,8 @@ batch. Reduce `window`/`overlap` first if you run out of memory.
 - `mode`: `buffered` (each frame also sees later frames; `overlap` applies) or `unbuffered`
   (each frame predicted from itself and the frames before it — lower latency and memory,
   `overlap` ignored).
+- `max_size`: same as the Estimate node (`0` = auto, sized for the free VRAM including
+  the window's extra cost, `-1` = native, positive = cap).
 
 ### DepthPro2 Focal Length
 Converts a **physical** lens focal length (mm, as engraved on the lens) to pixels for a known

@@ -42,7 +42,7 @@ def test_node_schemas(node_classes):
         assert schema.node_id == name
         assert schema.display_name
         # The native placement: the loader with the model loaders, the rest with the
-        # geometry estimation models (as the native MoGe / Depth Anything nodes do).
+        # geometry estimation models (the same split the built-in ComfyUI depth nodes use).
         assert schema.category == ("model/loaders" if name == "DepthPro2Loader" else "image/geometry estimation")
         assert schema.description
         assert callable(cls.execute)
@@ -115,7 +115,7 @@ def test_estimate_focal_toggle(nodes, make_batch, monkeypatch):
 
     # Off, linked pixels -> used as-is.
     with pytest.raises(_Sentinel):
-        nodes.DepthPro2Estimate.execute(None, batch, False, 0.0, 0, focal_length_px=500.0)
+        nodes.DepthPro2Estimate.execute(None, batch, False, 0.0, 500.0, 0)
     assert seen[-1] == 500.0
 
     # On, nothing set -> 0, the model estimates.
@@ -327,7 +327,7 @@ def test_video_focal_toggle(nodes, make_batch, monkeypatch):
 
     # Off, linked pixels -> used as-is.
     with pytest.raises(_Sentinel):
-        nodes.DepthPro2Video.execute(None, batch, 2, 1, False, 0.0, 0, focal_length_px=500.0)
+        nodes.DepthPro2Video.execute(None, batch, 2, 1, False, 0.0, 500.0, 0)
     assert seen[-1] == 500.0
 
     # On, nothing set -> 0, the model estimates from the first window.
@@ -389,7 +389,7 @@ def tiny_model(nodes, tmp_model_dir):
 
 def test_loader_auto_device_follows_session_policy(nodes, tiny_model, monkeypatch):
     # "auto" resolves through ComfyUI's device policy for auxiliary models (the
-    # native MoGe/Depth Anything pattern): a NO_VRAM session lands on the CPU, with
+    # native pattern): a NO_VRAM session lands on the CPU, with
     # the model riding on the CPU as well.
     cpu = torch.device("cpu")
     monkeypatch.setattr(nodes.mm, "text_encoder_device", lambda: cpu)

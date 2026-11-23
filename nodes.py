@@ -30,8 +30,8 @@ LOGGER = logging.getLogger(__name__)
 MODELS_DIR = Path(folder_paths.models_dir) / "depthpro2"
 folder_paths.add_model_folder_path("depthpro2", str(MODELS_DIR))
 
-# The native placement: the loader sits with the model loaders, the rest with the
-# geometry estimation models (as the native MoGe / Depth Anything nodes do).
+# Native placement: the loader sits with the model loaders, the rest with the
+# geometry estimation models (the same split the built-in ComfyUI depth nodes use).
 LOADER_CATEGORY = "model/loaders"
 CATEGORY = "image/geometry estimation"
 DEPTHPRO2_MODEL = io.Custom("DEPTHPRO2_MODEL")
@@ -209,9 +209,9 @@ def _load_repo_verified(
 def _load_state_dict(path: Path, dtype: torch.dtype) -> dict[str, torch.Tensor]:
     """Load the weights straight into ``dtype`` so no fp32 copy ever lives in RAM.
 
-    The native model loaders (MoGe, Depth Anything 3) build the model in the compute
-    dtype on the offload device; the fp32 file contents are read from the memory map
-    and converted tensor by tensor instead of being resident a second time.
+    The native ComfyUI model loaders build the model in the compute dtype on the
+    offload device; the fp32 file contents are read from the memory map and converted
+    tensor by tensor instead of being resident a second time.
     """
     if path.suffix == ".safetensors":
         state: dict[str, torch.Tensor] = {}
@@ -318,18 +318,17 @@ def _cast_storage(model: torch.nn.Module, dtype: torch.dtype) -> None:
 
 def load_depthpro2(name: str, precision: str, device: str) -> dict:
     if device == "auto":
-        # The native MoGe / Depth Anything device policy: honors --gpu-only, aimdo and
-        # the session VRAM state (a NO_VRAM session runs the model on the CPU).
+        # The native ComfyUI device policy for auxiliary models: honors --gpu-only,
+        # aimdo and the session VRAM state (a NO_VRAM session runs the model on the CPU).
         load_device = mm.text_encoder_device()
         offload_device = mm.text_encoder_offload_device()
     else:
         load_device = torch.device(device)
         offload_device = torch.device("cpu")
     if precision == "auto":
-        # ComfyUI's session dtype for auxiliary models, as the native MoGe / Depth
-        # Anything nodes use it (honors --fp16-text-enc & friends; fp8 text-enc flags
-        # fall back to fp16). CPU stays fp32: half-precision autocast is much slower
-        # there, as in Apple's reference loading.
+        # ComfyUI's session dtype for auxiliary models (honors --fp16-text-enc &
+        # friends; fp8 text-enc flags fall back to fp16). CPU stays fp32: half-precision
+        # autocast is much slower there, as in Apple's reference loading.
         if load_device.type == "cpu":
             precision = "fp32"
         else:
@@ -341,9 +340,10 @@ def load_depthpro2(name: str, precision: str, device: str) -> dict:
         compute_dtype = torch.float32
     config, state_dict, focal_state = _resolve_weights(name, compute_dtype)
 
-    # Build in system RAM and hand the weights to ComfyUI's model management (as the
-    # official MoGe nodes do): the model rides in the offload device until a run loads
-    # it onto the GPU, and is evicted again when other nodes need the VRAM. The storage
+    # Build in system RAM and hand the weights to ComfyUI's model management (the
+    # native pattern for auxiliary models): the model rides in the offload device until
+    # a run loads it onto the GPU, and is evicted again when other nodes need the VRAM.
+    # The storage
     # is cast to the compute dtype before the load, so the low-precision copy is the
     # only one in RAM (the native pattern: the model is built in the compute dtype on
     # the offload device, never in fp32).
@@ -588,8 +588,8 @@ def _prepare_frames(
     """ComfyUI IMAGE batch (T, H, W, 3) float 0..1 -> CPU uint8 staging frames and focal.
 
     The frames stay on the CPU; each one moves to and normalizes on the GPU as it is
-    consumed (the native per-chunk pattern: MoGe and Depth Anything keep the input batch
-    on the CPU and move only the active chunk), so a long batch never sits in VRAM.
+    consumed (the native per-chunk pattern: the input batch stays on the CPU and only
+    the active chunk moves to the GPU), so a long batch never sits in VRAM.
     """
     height, width = images.shape[1:3]
     scale = 1.0
@@ -737,9 +737,9 @@ class DepthPro2Loader(io.ComfyNode):
             description=(
                 "Load Apple Depth Pro 2. Preset names download weights from Hugging Face into "
                 "models/depthpro2 on first use; local .safetensors/.pt files in that folder are also "
-                "listed. auto uses ComfyUI's session dtype for auxiliary models (fp16 on CUDA, as in "
-                "the native MoGe/Depth Anything nodes; honors --fp16-text-enc/--bf16-text-enc), fp16 is "
-                "the native default and bf16 Apple's training precision; fp8 stores encoder weights as "
+                "listed. auto uses ComfyUI's session dtype for auxiliary models (fp16 on CUDA; honors "
+                "--fp16-text-enc/--bf16-text-enc), fp16 is the native default and bf16 Apple's training "
+                "precision; fp8 stores encoder weights as "
                 "float8 with per-channel scales (about half the memory of bf16). The model is managed "
                 "by ComfyUI's model management: it rides in RAM and is evicted from the GPU when other "
                 "nodes need the VRAM."
@@ -755,10 +755,9 @@ class DepthPro2Loader(io.ComfyNode):
                                        "float8 (about half the memory of bf16)."),
                 io.Combo.Input(
                     "device", options=["auto", "cuda", "mps", "cpu"], default="auto",
-                    tooltip="auto uses ComfyUI's device policy for auxiliary models (the same "
-                            "one the native MoGe/Depth Anything loaders use: honors --gpu-only, "
-                            "falls back to the CPU on machines without usable VRAM); "
-                            "an explicit device is used as-is.",
+                    tooltip="auto uses ComfyUI's device policy for auxiliary models (honors --gpu-only, "
+                            "falls back to the CPU on machines without usable VRAM); an explicit device "
+                            "is used as-is.",
                 ),
             ],
             outputs=[DEPTHPRO2_MODEL.Output(id="model", display_name="model")],
@@ -810,14 +809,14 @@ class DepthPro2Estimate(io.ComfyNode):
                 io.Float.Input("focal_length_mm", default=0.0, min=0.0, step=0.5,
                                tooltip="Lens focal length as a 35mm-equivalent (e.g. 24, 35, 50); 0 estimates "
                                        "it with the focal-length model (while 'Estimate focal length' is on)."),
+                io.Float.Input("focal_length_px", default=0.0, min=0.0, step=0.1, optional=True,
+                               tooltip="Focal length in pixels of the image, e.g. from the Focal Length node; "
+                                       "overrides focal_length_mm."),
                 io.Int.Input("max_size", default=0, min=-1, max=16384, step=32,
                              tooltip="0 (default) picks the largest resolution that fits the free VRAM; -1 "
                                      "runs at native resolution (may OOM on very large images); any positive "
                                      "value caps the longest side processed. The output is always upsampled "
                                      "back to the input size."),
-                io.Float.Input("focal_length_px", default=0.0, min=0.0, step=0.1, optional=True,
-                               tooltip="Focal length in pixels of the image, e.g. from the Focal Length node; "
-                                       "overrides focal_length_mm."),
             ],
             outputs=[
                 io.Image.Output(id="depth_image", display_name="depth_image",
@@ -833,8 +832,8 @@ class DepthPro2Estimate(io.ComfyNode):
 
     @classmethod
     def execute(cls, model: dict, image: torch.Tensor, estimate_focal_length: bool,
-                focal_length_mm: float, max_size: int,
-                focal_length_px: float | None = None) -> io.NodeOutput:
+                focal_length_mm: float, focal_length_px: float | None = None,
+                max_size: int = 0) -> io.NodeOutput:
         f_px = focal_length_px or _focal_mm_to_px(focal_length_mm, *image.shape[1:3])
         if f_px <= 0 and not estimate_focal_length:
             raise ValueError(
@@ -893,6 +892,9 @@ class DepthPro2Video(io.ComfyNode):
                 io.Float.Input("focal_length_mm", default=0.0, min=0.0, step=0.5,
                                tooltip="35mm-equivalent focal length; 0 estimates it from the first window "
                                        "(while 'Estimate focal length' is on)."),
+                io.Float.Input("focal_length_px", default=0.0, min=0.0, step=0.1, optional=True,
+                               tooltip="Focal length in pixels, e.g. from the Focal Length node; overrides "
+                                       "focal_length_mm."),
                 io.Int.Input("max_size", default=0, min=-1, max=16384, step=32,
                              tooltip="0 (default) picks the largest resolution that fits the free VRAM "
                                      "(accounting for the window); -1 native; positive caps the longest "
@@ -900,9 +902,6 @@ class DepthPro2Video(io.ComfyNode):
                 io.Combo.Input("mode", options=["buffered", "unbuffered"], default="buffered", advanced=True,
                                tooltip="buffered lets each frame also see later frames; unbuffered predicts "
                                        "from the past only, at lower latency and memory."),
-                io.Float.Input("focal_length_px", default=0.0, min=0.0, step=0.1, optional=True,
-                               tooltip="Focal length in pixels, e.g. from the Focal Length node; overrides "
-                                       "focal_length_mm."),
             ],
             outputs=[
                 io.Image.Output(id="depth_image", display_name="depth_image",
@@ -918,9 +917,9 @@ class DepthPro2Video(io.ComfyNode):
 
     @classmethod
     def execute(cls, model: dict, images: torch.Tensor, window: int, overlap: int,
-                estimate_focal_length: bool, focal_length_mm: float, max_size: int,
-                mode: str = "buffered",
-                focal_length_px: float | None = None) -> io.NodeOutput:
+                estimate_focal_length: bool, focal_length_mm: float,
+                focal_length_px: float | None = None, max_size: int = 0,
+                mode: str = "buffered") -> io.NodeOutput:
         if mode == "buffered" and overlap >= window:
             raise ValueError("overlap must be smaller than window.")
         f_px = focal_length_px or _focal_mm_to_px(focal_length_mm, *images.shape[1:3])

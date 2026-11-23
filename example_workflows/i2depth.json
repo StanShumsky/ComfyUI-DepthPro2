@@ -7,24 +7,36 @@
     {
       "id": 1,
       "type": "MarkdownNote",
-      "pos": [-480, 100],
-      "size": [420, 380],
+      "pos": [
+        -480,
+        100
+      ],
+      "size": [
+        420,
+        400
+      ],
       "flags": {},
       "order": 0,
       "mode": 0,
       "inputs": [],
       "outputs": [],
-      "title": "DepthPro2 — Image to Depth",
+      "title": "DepthPro2 \u00e2\u20ac\u201d Image to Depth",
       "properties": {},
       "widgets_values": [
-        "## DepthPro2 — Image to Depth\n\nMetric depth (meters) from a single photo with [Apple Depth Pro 2](https://huggingface.co/apple/DepthPro2).\n\n**Loader**\n- `model`: `depthpro2-s/b/l/h` download automatically into `models/depthpro2` on first use (S: 97 MB, H+: 3.5 GB). Larger = sharper and steadier.\n- `precision`: `auto` = bf16 on GPU, fp32 on CPU. `fp8` halves weight memory again (~7% depth deviation); `bf16` is near-lossless (~0.7%).\n\n**Estimate**\n- `focal_length_mm`: lens focal length as a 35mm-equivalent in mm (24, 35, 50… — the EXIF FocalLengthIn35mmFilm value); `0` estimates it automatically while the **Estimate focal length** toggle is on (default) — with it off, an explicit focal length is required. Depth in meters scales linearly with focal length — set it if you know it. For cine cameras (physical mm + sensor size), use the **DepthPro2 Focal Length** node and link its output to the optional `focal_length_px` input.\n- `max_size`: longest side processed; `0` = native resolution (sharpest edges, most memory).\n\n**Outputs**\n- `depth_image`: normalized inverse depth, near white / far black (preview / ControlNet).\n- `depth_meters`: raw metric depth `(T, H, W)`, `inf` at sky.\n- `sky`: MASK, 1 at sky — a ready-made comp holdout.\n- `focal_length_px`: focal used, in pixels of the input.\n\n**Colorize**\n- `colormap`: `turbo` is Apple's preview colormap (dark blue far, red/white near); scale anchored on the nearest point + 20% headroom. Also `viridis`, `inferno`, `magma`, `plasma`, `gray`.\n\nWeights are licensed for **non-commercial research only** (Apple AMLR)."
+        "## DepthPro2 \u00e2\u20ac\u201d Image to Depth\n\nMetric depth (meters) from a single photo with [Apple Depth Pro 2](https://huggingface.co/apple/DepthPro2).\n\n**Loader**\n- `model`: `depthpro2-s/b/l/h` download automatically into `models/depthpro2` on first use (S: 97 MB, H+: 3.5 GB). Larger = sharper and steadier.\n- `precision`: `auto` = bf16 on GPU, fp32 on CPU. `fp8` halves weight memory again (~7% depth deviation); `bf16` is near-lossless (~0.7%).\n\n**Estimate**\n- `focal_length_mm`: lens focal length as a 35mm-equivalent in mm (24, 35, 50\u00e2\u20ac\u00a6 \u00e2\u20ac\u201d the EXIF FocalLengthIn35mmFilm value); `0` estimates it automatically while the **Estimate focal length** toggle is on (default) \u00e2\u20ac\u201d with it off, an explicit focal length is required. Depth in meters scales linearly with focal length \u00e2\u20ac\u201d set it if you know it. For cine cameras (physical mm + sensor size), use the **DepthPro2 Focal Length** node and link its output to the optional `focal_length_px` input.\n- `max_size`: longest side processed; `0` = native resolution (sharpest edges, most memory).\n\n**Outputs**\n- `depth_image`: normalized inverse depth, near white / far black (preview / ControlNet).\n- `depth_meters`: raw metric depth `(T, H, W)`, `inf` at sky.\n- `sky`: MASK, 1 at sky \u00e2\u20ac\u201d a ready-made comp holdout.\n- `focal_length_px`: focal used, in pixels of the input.\n\n**Colorize**\n- `colormap`: `turbo` is Apple's preview colormap (dark blue far, red/white near); scale anchored on the nearest point + 20% headroom. Also `viridis`, `inferno`, `magma`, `plasma`, `gray`.\n\nWeights are licensed for **non-commercial research only** (Apple AMLR)."
       ]
     },
     {
       "id": 2,
       "type": "DepthPro2Loader",
-      "pos": [0, 100],
-      "size": [320, 106],
+      "pos": [
+        0,
+        100
+      ],
+      "size": [
+        320,
+        120
+      ],
       "flags": {},
       "order": 1,
       "mode": 0,
@@ -33,19 +45,31 @@
         {
           "name": "model",
           "type": "DEPTHPRO2_MODEL",
-          "links": [1]
+          "links": [
+            1
+          ]
         }
       ],
       "properties": {
         "Node name for S&R": "DepthPro2Loader"
       },
-      "widgets_values": ["depthpro2-s", "auto", "auto"]
+      "widgets_values": [
+        "depthpro2-s",
+        "auto",
+        "auto"
+      ]
     },
     {
       "id": 3,
       "type": "LoadImage",
-      "pos": [0, 260],
-      "size": [320, 314],
+      "pos": [
+        0,
+        280
+      ],
+      "size": [
+        320,
+        330
+      ],
       "flags": {},
       "order": 2,
       "mode": 0,
@@ -54,7 +78,9 @@
         {
           "name": "IMAGE",
           "type": "IMAGE",
-          "links": [2]
+          "links": [
+            2
+          ]
         },
         {
           "name": "MASK",
@@ -66,13 +92,22 @@
         "Node name for S&R": "LoadImage",
         "cnr_id": "comfy-core"
       },
-      "widgets_values": ["example.png", "image"]
+      "widgets_values": [
+        "example.png",
+        "image"
+      ]
     },
     {
       "id": 4,
       "type": "DepthPro2Estimate",
-      "pos": [390, 130],
-      "size": [340, 150],
+      "pos": [
+        390,
+        100
+      ],
+      "size": [
+        340,
+        160
+      ],
       "flags": {},
       "order": 3,
       "mode": 0,
@@ -92,12 +127,17 @@
         {
           "name": "depth_image",
           "type": "IMAGE",
-          "links": [3, 4]
+          "links": [
+            3,
+            4
+          ]
         },
         {
           "name": "depth_meters",
           "type": "DEPTHPRO2_DEPTH",
-          "links": [5]
+          "links": [
+            5
+          ]
         },
         {
           "name": "focal_length_px",
@@ -113,13 +153,24 @@
       "properties": {
         "Node name for S&R": "DepthPro2Estimate"
       },
-      "widgets_values": [true, 0.0, 0, 0.0]
+      "widgets_values": [
+        true,
+        0.0,
+        0.0,
+        0
+      ]
     },
     {
       "id": 5,
       "type": "PreviewImage",
-      "pos": [800, 100],
-      "size": [420, 340],
+      "pos": [
+        800,
+        100
+      ],
+      "size": [
+        420,
+        350
+      ],
       "flags": {},
       "order": 4,
       "mode": 0,
@@ -140,8 +191,14 @@
     {
       "id": 6,
       "type": "SaveImage",
-      "pos": [800, 490],
-      "size": [420, 350],
+      "pos": [
+        800,
+        510
+      ],
+      "size": [
+        420,
+        360
+      ],
       "flags": {},
       "order": 5,
       "mode": 0,
@@ -157,13 +214,21 @@
         "Node name for S&R": "SaveImage",
         "cnr_id": "comfy-core"
       },
-      "widgets_values": ["depthpro2/depth"]
+      "widgets_values": [
+        "depthpro2/depth"
+      ]
     },
     {
       "id": 7,
       "type": "DepthPro2Colorize",
-      "pos": [390, 330],
-      "size": [340, 80],
+      "pos": [
+        390,
+        320
+      ],
+      "size": [
+        340,
+        90
+      ],
       "flags": {},
       "order": 6,
       "mode": 0,
@@ -178,19 +243,29 @@
         {
           "name": "depth_color",
           "type": "IMAGE",
-          "links": [6]
+          "links": [
+            6
+          ]
         }
       ],
       "properties": {
         "Node name for S&R": "DepthPro2Colorize"
       },
-      "widgets_values": ["turbo"]
+      "widgets_values": [
+        "turbo"
+      ]
     },
     {
       "id": 8,
       "type": "PreviewImage",
-      "pos": [800, 890],
-      "size": [420, 340],
+      "pos": [
+        800,
+        930
+      ],
+      "size": [
+        420,
+        350
+      ],
       "flags": {},
       "order": 7,
       "mode": 0,
@@ -210,19 +285,64 @@
     }
   ],
   "links": [
-    [1, 2, 0, 4, 0, "DEPTHPRO2_MODEL"],
-    [2, 3, 0, 4, 1, "IMAGE"],
-    [3, 4, 0, 5, 0, "IMAGE"],
-    [4, 4, 0, 6, 0, "IMAGE"],
-    [5, 4, 1, 7, 0, "DEPTHPRO2_DEPTH"],
-    [6, 7, 0, 8, 0, "IMAGE"]
+    [
+      1,
+      2,
+      0,
+      4,
+      0,
+      "DEPTHPRO2_MODEL"
+    ],
+    [
+      2,
+      3,
+      0,
+      4,
+      1,
+      "IMAGE"
+    ],
+    [
+      3,
+      4,
+      0,
+      5,
+      0,
+      "IMAGE"
+    ],
+    [
+      4,
+      4,
+      0,
+      6,
+      0,
+      "IMAGE"
+    ],
+    [
+      5,
+      4,
+      1,
+      7,
+      0,
+      "DEPTHPRO2_DEPTH"
+    ],
+    [
+      6,
+      7,
+      0,
+      8,
+      0,
+      "IMAGE"
+    ]
   ],
   "groups": [],
   "config": {},
   "extra": {
     "ds": {
       "scale": 0.8,
-      "offset": [500, 0]
+      "offset": [
+        500,
+        0
+      ]
     }
   },
   "version": 0.4

@@ -481,6 +481,15 @@
                 "localized_name": "focal_length_mm"
               },
               {
+                "name": "focal_length_px",
+                "type": "FLOAT",
+                "link": null,
+                "widget": {
+                  "name": "focal_length_px"
+                },
+                "localized_name": "focal_length_px"
+              },
+              {
                 "name": "max_size",
                 "type": "INT",
                 "link": 207,
@@ -497,15 +506,6 @@
                   "name": "mode"
                 },
                 "localized_name": "mode"
-              },
-              {
-                "name": "focal_length_px",
-                "type": "FLOAT",
-                "link": null,
-                "widget": {
-                  "name": "focal_length_px"
-                },
-                "localized_name": "focal_length_px"
               }
             ],
             "outputs": [
@@ -557,9 +557,9 @@
               4,
               true,
               0.0,
+              0.0,
               0,
-              "buffered",
-              0.0
+              "buffered"
             ]
           },
           {
@@ -720,7 +720,7 @@
             "origin_id": -10,
             "origin_slot": 4,
             "target_id": 5,
-            "target_slot": 6,
+            "target_slot": 7,
             "type": "INT"
           },
           {
