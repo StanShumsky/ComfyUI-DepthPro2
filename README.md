@@ -40,7 +40,9 @@ into that folder — the size is auto-detected, or read from a `config.json` nex
 ### DepthPro2 Loader
 - `model`: `depthpro2-s/b/l/h` (auto-download) or any local weight file in `models/depthpro2`.
 - `precision`: `auto`, `bf16`, `fp16`, `fp32`, `fp8`.
-- `device`: `auto` (ComfyUI's device), `cuda`, `mps`, `cpu`.
+- `device`: `auto` (ComfyUI's device policy for auxiliary models, as in the native
+  MoGe/Depth Anything loaders — honors `--gpu-only`, falls back to the CPU on machines
+  without usable VRAM), `cuda`, `mps`, `cpu`.
 
 ### DepthPro2 Estimate Depth
 Each image of the batch is processed independently (use this for unrelated photos).
@@ -125,6 +127,13 @@ Drag into ComfyUI (or use Workflow → Open):
   point clouds — the Position Pass node's `max_depth` does this for you.
 - Depth → 3D points: the **Position Pass** node outputs camera-space XYZ with the image center
   as principal point; chain it into **Save PLY Points** for a metric point cloud.
+- Small GPUs: the weights ride in RAM and occupy VRAM only while a run is in progress (ComfyUI
+  evicts them when other models need the VRAM). `max_size=0` (auto) scales the processing
+  resolution to the VRAM free at run time; if a frame still runs out of memory, the size halves
+  and retries down to a 256 px longest side before raising. The pack never falls back to the CPU
+  on OOM — on a tight session choose a smaller preset or the fp8 precision instead. On machines
+  with no usable VRAM, `device=auto` runs the model on the CPU (the same policy as the native
+  loaders); it works, but slowly.
 
 ## Tests
 
