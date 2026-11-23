@@ -66,18 +66,62 @@ def test_focal_mm_to_px(nodes):
     assert abs(nodes._focal_mm_to_px(50.0, 2400, 3600) - 5000.0) < 1e-6
 
 
-def test_focal_length_node(nodes, make_batch):
+def test_focal_length_node(nodes):
     execute = nodes.DepthPro2FocalLength.execute
     full_frame = next(iter(nodes.SENSOR_PRESETS))
-    (fpx,) = execute(50.0, full_frame, 36.0, 3600).result
+    (fpx,) = execute(50.0, full_frame, 36.0, 3600.0).result
     assert abs(fpx - 5000.0) < 1e-6
-    (fpx,) = execute(35.0, "custom", 27.03, 4096).result
+    (fpx,) = execute(35.0, "custom", 27.03, 4096.0).result
     assert abs(fpx - 35.0 * 4096 / 27.03) < 1e-6
-    batch = make_batch(t=1, h=256, w=384)
-    (fpx,) = execute(50.0, full_frame, 36.0, 1920, image=batch).result
-    assert abs(fpx - 50.0 * 384 / 36.0) < 1e-6
-    (fpx,) = execute(0.0, "custom", 36.0, 1920).result
+    # Portrait: the image height spans the sensor width, same math.
+    (fpx,) = execute(50.0, full_frame, 36.0, 2400.0).result
+    assert abs(fpx - 50.0 * 2400 / 36.0) < 1e-6
+    (fpx,) = execute(0.0, "custom", 36.0, 1920.0).result
     assert fpx == 0.0
+
+
+def test_focal_length_validation(nodes):
+    execute = nodes.DepthPro2FocalLength.execute
+    full_frame = next(iter(nodes.SENSOR_PRESETS))
+    with pytest.raises(ValueError, match="sensor_width_mm"):
+        execute(35.0, "custom", 0.0, 4096.0)
+    with pytest.raises(ValueError, match="image_side_px"):
+        execute(35.0, full_frame, 36.0, 0.0)
+
+
+class _Sentinel(Exception):
+    """Stops the faked _run_inference so these tests need no real model."""
+
+
+def test_estimate_focal_toggle(nodes, make_batch, monkeypatch):
+    """Toggle off requires an explicit focal length; on (the default), 0 lets the model estimate it."""
+    batch = make_batch(t=1, h=32, w=32)
+    seen = []
+
+    def fake_run(model, image, f_px, max_size, desc, **kwargs):
+        seen.append(f_px)
+        raise _Sentinel()
+
+    monkeypatch.setattr(nodes, "_run_inference", fake_run)
+
+    # Off, nothing set -> ValueError before inference starts.
+    with pytest.raises(ValueError, match="Estimate focal length"):
+        nodes.DepthPro2Estimate.execute(None, batch, False, 0.0, 0)
+
+    # Off, 35mm-equivalent -> converted pixels reach inference.
+    with pytest.raises(_Sentinel):
+        nodes.DepthPro2Estimate.execute(None, batch, False, 35.0, 0)
+    assert abs(seen[-1] - 35.0 * math.hypot(32, 32) / math.hypot(36.0, 24.0)) < 1e-6
+
+    # Off, linked pixels -> used as-is.
+    with pytest.raises(_Sentinel):
+        nodes.DepthPro2Estimate.execute(None, batch, False, 0.0, 0, focal_length_px=500.0)
+    assert seen[-1] == 500.0
+
+    # On, nothing set -> 0, the model estimates.
+    with pytest.raises(_Sentinel):
+        nodes.DepthPro2Estimate.execute(None, batch, True, 0.0, 0)
+    assert seen[-1] == 0.0
 
 
 def test_prepare_frames_resize_and_focal(nodes, make_batch):

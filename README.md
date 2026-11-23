@@ -46,9 +46,12 @@ into that folder — the size is auto-detected, or read from a `config.json` nex
 
 ### DepthPro2 Estimate Depth
 Each image of the batch is processed independently (use this for unrelated photos).
+- `estimate_focal_length` (toggle, on by default): with it on, `0` in `focal_length_mm` (and
+  no linked `focal_length_px`) lets the focal-length model estimate the focal length; with it
+  off, an explicit focal length is required and a `ValueError` is raised without one.
 - `focal_length_mm`: lens focal length as a **35mm-equivalent** in mm (e.g. 24, 35, 50 — the
-  EXIF `FocalLengthIn35mmFilm` value); `0` estimates it with the focal-length model. Depth in
-  meters scales linearly with focal length — provide it when you know it.
+  EXIF `FocalLengthIn35mmFilm` value); `0` estimates it with the focal-length model (while the
+  toggle is on). Depth in meters scales linearly with focal length — provide it when you know it.
 - `focal_length_px` (optional input): overrides `focal_length_mm` when linked — use the
   Focal Length node below for physical mm with a known camera sensor.
 - `max_size`: cap the longest side processed (`0` = native resolution, sharpest edges).
@@ -72,7 +75,8 @@ Converts a **physical** lens focal length (mm, as engraved on the lens) to pixel
 sensor size — for cine/mirrorless cameras (ARRI, Blackmagic, Sony…). Presets cover full frame,
 ALEXA 35 / Mini LF / Mini-AMIRA, URSA 12K, Pocket 6K, Super 35, APS-C, Micro Four Thirds and
 1-inch; `custom` takes an exact `sensor_width_mm` (for cropped readouts, use the width of the
-sensor area actually used). Link `image` to take the width from it, or set `width` manually.
+sensor area actually used). Enter `image_side_px`: the image pixels along the sensor's full
+width — the **width** for landscape images, the **height** for portrait images.
 Link the `focal_length_px` output to the optional `focal_length_px` input of the Estimate/Video
 nodes; it overrides `focal_length_mm`. For phone photos and unknown cameras, keep using the
 35mm-equivalent `focal_length_mm` widget instead.

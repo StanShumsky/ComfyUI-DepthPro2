@@ -529,12 +529,13 @@ class DepthPro2FocalLength(io.ComfyNode):
             category=CATEGORY,
             description=(
                 "Convert a physical lens focal length (mm, as engraved on the lens) to pixels for a "
-                "known sensor size, for cine/mirrorless cameras (ARRI, Blackmagic, Sony...). Link the "
-                "image to use its width, or set width manually. Pick a sensor preset or 'custom' "
-                "with sensor_width_mm; the conversion assumes the image spans the full sensor width "
-                "(for cropped readouts, use the width of the sensor area actually used). Link the "
-                "output to the focal_length_px input of the Estimate/Video nodes. For phone photos "
-                "and unknown cameras, use the focal_length_mm (35mm-equivalent) widget instead."
+                "known sensor size, for cine/mirrorless cameras (ARRI, Blackmagic, Sony...). Enter the "
+                "image pixels along the sensor's full width — the width for landscape images, the "
+                "height for portrait images. Pick a sensor preset or 'custom' with sensor_width_mm; "
+                "the conversion assumes that side spans the full sensor width (for cropped readouts, "
+                "enter the width of the sensor area actually used). Link the output to the "
+                "focal_length_px input of the Estimate/Video nodes. For phone photos and unknown "
+                "cameras, use the focal_length_mm (35mm-equivalent) widget instead."
             ),
             inputs=[
                 io.Float.Input("focal_length_mm", default=35.0, min=0.0, step=0.5,
@@ -544,11 +545,11 @@ class DepthPro2FocalLength(io.ComfyNode):
                                tooltip="The camera sensor (its width is what matters); 'custom' uses "
                                        "sensor_width_mm."),
                 io.Float.Input("sensor_width_mm", default=36.0, min=0.1, max=100.0, step=0.01, advanced=True,
-                               tooltip="Sensor width in mm, used for the 'custom' sensor only."),
-                io.Int.Input("width", default=1920, min=1, max=16384, advanced=True,
-                             tooltip="Image width in pixels, when no image is linked."),
-                io.Image.Input("image", optional=True,
-                               tooltip="Link the image to use its width."),
+                               tooltip="Sensor width in mm, required for the 'custom' sensor."),
+                io.Float.Input("image_side_px", default=1920.0, min=1.0, max=16384.0, step=1.0, advanced=True,
+                               tooltip="Image pixels along the sensor's full width: the width for landscape "
+                                       "images, the height for portrait images (for cropped readouts, the "
+                                       "width of the sensor area actually used)."),
             ],
             outputs=[
                 io.Float.Output(id="focal_length_px", display_name="focal_length_px",
@@ -557,15 +558,20 @@ class DepthPro2FocalLength(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, focal_length_mm: float, sensor: str, sensor_width_mm: float, width: int,
-                image: torch.Tensor | None = None) -> io.NodeOutput:
-        if image is not None:
-            width = image.shape[2]
+    def execute(cls, focal_length_mm: float, sensor: str, sensor_width_mm: float,
+                image_side_px: float) -> io.NodeOutput:
+        if image_side_px <= 0:
+            raise ValueError("image_side_px must be a positive pixel count.")
         preset = SENSOR_PRESETS[sensor]
         sensor_w = preset[0] if preset is not None else sensor_width_mm
+        if sensor_w is None or sensor_w <= 0:
+            raise ValueError(
+                f"sensor '{sensor}' has no known size: set a positive sensor_width_mm "
+                "(the 'custom' sensor needs its width in mm)."
+            )
         if focal_length_mm <= 0:
             return io.NodeOutput(0.0)
-        return io.NodeOutput(focal_length_mm * width / sensor_w)
+        return io.NodeOutput(focal_length_mm * image_side_px / sensor_w)
 
 
 def _prepare_frames(
@@ -770,7 +776,10 @@ class DepthPro2Estimate(io.ComfyNode):
                 "is raw metric depth (T, H, W) with inf at sky; sky is a MASK (1 at sky) for comp "
                 "holdouts. focal_length_mm is the lens focal length "
                 "as a 35mm-equivalent (e.g. 24, 35, 50 — the EXIF FocalLengthIn35mmFilm value); 0 "
-                "estimates it with the focal-length model. Depth in meters scales linearly with focal "
+                "estimates it with the focal-length model, as long as the 'Estimate focal length' "
+                "toggle (on by default) is on — with it off, an explicit focal length is required "
+                "(focal_length_mm or a linked focal_length_px) and a ValueError is raised without one. "
+                "Depth in meters scales linearly with focal "
                 "length. max_size: 0 (default) picks the largest resolution that fits the free VRAM "
                 "automatically, -1 runs at native resolution (sharpest edges, may OOM on very large "
                 "images), any positive value caps the longest side processed; the output is always "
@@ -785,9 +794,14 @@ class DepthPro2Estimate(io.ComfyNode):
             inputs=[
                 DEPTHPRO2_MODEL.Input("model"),
                 io.Image.Input("image", tooltip="An image, or a batch of images (each estimated independently)."),
+                io.Boolean.Input("estimate_focal_length", default=True,
+                                 tooltip="Let the model estimate the focal length when none is given "
+                                         "(focal_length_mm is 0 and focal_length_px is not linked). Off: an "
+                                         "explicit focal length is required (focal_length_mm or a linked "
+                                         "focal_length_px) and a ValueError is raised without one."),
                 io.Float.Input("focal_length_mm", default=0.0, min=0.0, step=0.5,
                                tooltip="Lens focal length as a 35mm-equivalent (e.g. 24, 35, 50); 0 estimates "
-                                       "it with the focal-length model."),
+                                       "it with the focal-length model (while 'Estimate focal length' is on)."),
                 io.Int.Input("max_size", default=0, min=-1, max=16384, step=32,
                              tooltip="0 (default) picks the largest resolution that fits the free VRAM; -1 "
                                      "runs at native resolution (may OOM on very large images); any positive "
@@ -810,9 +824,16 @@ class DepthPro2Estimate(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, model: dict, image: torch.Tensor, focal_length_mm: float, max_size: int,
+    def execute(cls, model: dict, image: torch.Tensor, estimate_focal_length: bool,
+                focal_length_mm: float, max_size: int,
                 focal_length_px: float | None = None) -> io.NodeOutput:
         f_px = focal_length_px or _focal_mm_to_px(focal_length_mm, *image.shape[1:3])
+        if f_px <= 0 and not estimate_focal_length:
+            raise ValueError(
+                "DepthPro2 estimate: no focal length is set (focal_length_mm is 0 and "
+                "focal_length_px is not linked) and 'Estimate focal length' is off. Set "
+                "focal_length_mm or link focal_length_px, or re-enable the toggle."
+            )
         predictions, scale = _run_inference(model, image, f_px, max_size, "DepthPro2 estimate")
         mm.soft_empty_cache()
         return io.NodeOutput(*_depth_outputs(predictions, tuple(image.shape[1:3]), scale))

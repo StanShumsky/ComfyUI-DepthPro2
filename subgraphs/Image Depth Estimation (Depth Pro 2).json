@@ -5,7 +5,7 @@
   "nodes": [
     {
       "id": 100,
-      "type": "bcd1e522-1e3e-46af-874f-089138f54fbe",
+      "type": "dc10fe7c-fcd9-4524-bd3a-74b4f0d30025",
       "pos": [
         -1000,
         -320
@@ -111,7 +111,7 @@
   "definitions": {
     "subgraphs": [
       {
-        "id": "bcd1e522-1e3e-46af-874f-089138f54fbe",
+        "id": "dc10fe7c-fcd9-4524-bd3a-74b4f0d30025",
         "version": 1,
         "state": {
           "lastGroupId": 0,
@@ -142,7 +142,7 @@
         },
         "inputs": [
           {
-            "id": "6d4e640b-0091-4a26-92f5-da2bbce24e8c",
+            "id": "6270b393-5ba3-4364-ac48-3c230cdfe6c8",
             "name": "model",
             "type": "COMBO",
             "linkIds": [
@@ -155,7 +155,7 @@
             ]
           },
           {
-            "id": "02b75469-a3e7-4c69-b072-c15380bb7233",
+            "id": "ff1bfe3d-6b13-4632-8606-10dce0793714",
             "name": "source_image",
             "type": "IMAGE",
             "linkIds": [
@@ -168,7 +168,7 @@
             ]
           },
           {
-            "id": "da2906c1-3c76-428a-899b-3fde85d5a1f0",
+            "id": "7e79a5b0-c522-422c-a2b6-a484ccbed1c0",
             "name": "focal_length_mm",
             "type": "FLOAT",
             "linkIds": [
@@ -181,7 +181,7 @@
             ]
           },
           {
-            "id": "08aa44e0-3986-4d29-8d34-457f568f171f",
+            "id": "1ca45f13-02c1-4695-804c-7f2ee6da6bce",
             "name": "max_size",
             "type": "INT",
             "linkIds": [
@@ -196,7 +196,7 @@
         ],
         "outputs": [
           {
-            "id": "004d9f78-616e-4147-a787-b94c17ebfeb4",
+            "id": "eb0b2216-3a26-461e-b24b-5a4dbea4acc3",
             "name": "depth_image",
             "type": "IMAGE",
             "linkIds": [
@@ -209,7 +209,7 @@
             ]
           },
           {
-            "id": "2855809a-3dbe-44dc-92ab-91c431e7871b",
+            "id": "8376ad4e-4e99-4137-9b87-6af35be4e57b",
             "name": "depth_color",
             "type": "IMAGE",
             "linkIds": [
@@ -222,7 +222,7 @@
             ]
           },
           {
-            "id": "4677854c-d7ce-470d-8c82-c71d274036b5",
+            "id": "e91637c9-b617-4df8-815e-3e13365d2994",
             "name": "depth_meters",
             "type": "DEPTHPRO2_DEPTH",
             "linkIds": [
@@ -235,7 +235,7 @@
             ]
           },
           {
-            "id": "aff7dae8-bd6b-4152-9ec6-0e6832fa7179",
+            "id": "8c98d5c3-5f58-4cb4-ac9d-a3561b67af0c",
             "name": "sky_mask",
             "type": "MASK",
             "linkIds": [
@@ -348,6 +348,15 @@
                 "localized_name": "image"
               },
               {
+                "name": "estimate_focal_length",
+                "type": "BOOLEAN",
+                "link": null,
+                "widget": {
+                  "name": "estimate_focal_length"
+                },
+                "localized_name": "estimate_focal_length"
+              },
+              {
                 "name": "focal_length_mm",
                 "type": "FLOAT",
                 "link": 104,
@@ -420,6 +429,7 @@
               "secondTabWidth": 65
             },
             "widgets_values": [
+              true,
               0.0,
               0,
               0.0
@@ -513,7 +523,7 @@
             "origin_id": -10,
             "origin_slot": 2,
             "target_id": 4,
-            "target_slot": 2,
+            "target_slot": 3,
             "type": "FLOAT"
           },
           {
@@ -521,7 +531,7 @@
             "origin_id": -10,
             "origin_slot": 3,
             "target_id": 4,
-            "target_slot": 3,
+            "target_slot": 4,
             "type": "INT"
           },
           {
