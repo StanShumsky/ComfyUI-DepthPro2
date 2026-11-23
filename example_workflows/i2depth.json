@@ -105,7 +105,7 @@
           "links": null
         },
         {
-          "name": "sky",
+          "name": "sky_mask",
           "type": "MASK",
           "links": null
         }
@@ -113,7 +113,7 @@
       "properties": {
         "Node name for S&R": "DepthPro2Estimate"
       },
-      "widgets_values": [0.0, 0]
+      "widgets_values": [0.0, 0, 0.0]
     },
     {
       "id": 5,

@@ -17,6 +17,7 @@ import folder_paths
 import comfy.model_management as mm
 import comfy.model_patcher
 from comfy.utils import ProgressBar
+from comfy_api.latest import io, ui
 from tqdm.auto import tqdm
 
 from .depth_pro_2 import PRESETS, DepthPro2
@@ -28,6 +29,10 @@ LOGGER = logging.getLogger(__name__)
 
 MODELS_DIR = Path(folder_paths.models_dir) / "depthpro2"
 folder_paths.add_model_folder_path("depthpro2", str(MODELS_DIR))
+
+CATEGORY = "depth/DepthPro2"
+DEPTHPRO2_MODEL = io.Custom("DEPTHPRO2_MODEL")
+DEPTHPRO2_DEPTH = io.Custom("DEPTHPRO2_DEPTH")
 
 HF_REPOS = {
     "depthpro2-s": "apple/DepthPro2-S",
@@ -127,11 +132,28 @@ def _find_local_file(name: str) -> Path:
     )
 
 
-def _check_weights(state_dict: dict[str, torch.Tensor], name: str) -> None:
+def _corrupt_safetensors(message: str, path: str, incomplete: bool = True) -> ValueError:
+    """The native corrupt-file diagnostic (comfy.utils), with the file path, so the UI
+    shows the same wording for this pack's weights as for the native models'."""
+    if incomplete:
+        hint = (
+            "The safetensors file is corrupt/incomplete. Check the file size and make sure "
+            "you have copied/downloaded it correctly."
+        )
+    else:
+        hint = (
+            "The safetensors file is corrupt or invalid. Make sure this is actually a "
+            "safetensors file and not a ckpt or pt or other filetype."
+        )
+    return ValueError(f"{message}\n\nFile path: {path}\n\n{hint}")
+
+
+def _check_weights(state_dict: dict[str, torch.Tensor], name: str, path: str) -> None:
     """Raise if the weights are visibly broken, e.g. a truncated or zero-filled download.
 
     Such a file still loads with strict=True (all keys and shapes are there) but predicts
-    garbage, typically a black depth image, so it is caught here instead.
+    garbage, typically a black depth image, so it is caught here instead, with the same
+    diagnostics ComfyUI's native loaders report.
     """
     nonfinite, zeros = [], []
     for key, value in state_dict.items():
@@ -143,10 +165,11 @@ def _check_weights(state_dict: dict[str, torch.Tensor], name: str) -> None:
             zeros.append(key)
     if nonfinite or len(zeros) >= 3:
         bad = (nonfinite + zeros)[:3]
-        raise RuntimeError(
+        raise _corrupt_safetensors(
             f"{name}: weights look corrupt ({len(nonfinite)} tensors with NaN/inf, "
-            f"{len(zeros)} all-zero tensors, e.g. {bad}). The file is probably an incomplete "
-            "download."
+            f"{len(zeros)} all-zero tensors, e.g. {bad}).",
+            path,
+            incomplete=False,
         )
 
 
@@ -155,19 +178,22 @@ def _load_repo_verified(
 ) -> tuple[Path, dict[str, torch.Tensor]]:
     """Load a downloaded model in ``dtype``; if it is unreadable or corrupt, re-download once."""
     last_error: Exception | None = None
+    path = ""
     for attempt in range(2):
         local = _download_repo(repo_id, name, force=attempt == 1)
+        path = str(local / "model.safetensors")
         try:
             state_dict = _load_state_dict(local / "model.safetensors", dtype)
-            _check_weights(state_dict, name)
+            _check_weights(state_dict, name, path)
             return local, state_dict
         except Exception as error:  # truncated safetensors raise their own error type
             last_error = error
             if attempt == 0:
                 LOGGER.warning("DepthPro2: %s; re-downloading %s.", error, name)
-    raise RuntimeError(
+    raise _corrupt_safetensors(
         f"{name} is still unusable after a fresh download from {repo_id}: {last_error}. "
-        f"Check free disk space in {_model_dirs()[0]} and your connection."
+        f"Check free disk space in {_model_dirs()[0]} and your connection.",
+        path,
     ) from last_error
 
 
@@ -238,8 +264,13 @@ def _resolve_weights(
         config = json.loads((local / "config.json").read_text())
     else:
         path = _find_local_file(name)
-        state_dict = _load_state_dict(path, dtype)
-        _check_weights(state_dict, name)
+        try:
+            state_dict = _load_state_dict(path, dtype)
+        except FileNotFoundError:
+            raise
+        except Exception as error:  # truncated/corrupt file: native-style diagnostic
+            raise _corrupt_safetensors(f"Could not load the weights: {error}", str(path)) from error
+        _check_weights(state_dict, name, str(path))
         _annotate_source(state_dict, str(path))
         config_path = path.with_name("config.json")
         if config_path.exists():
@@ -278,9 +309,13 @@ def _cast_storage(model: torch.nn.Module, dtype: torch.dtype) -> None:
 
 def load_depthpro2(name: str, precision: str, device: str) -> dict:
     if device == "auto":
-        load_device = mm.get_torch_device()
+        # The native MoGe / Depth Anything device policy: honors --gpu-only, aimdo and
+        # the session VRAM state (a NO_VRAM session runs the model on the CPU).
+        load_device = mm.text_encoder_device()
+        offload_device = mm.text_encoder_offload_device()
     else:
         load_device = torch.device(device)
+        offload_device = torch.device("cpu")
     if precision == "auto":
         # ComfyUI's session dtype for auxiliary models, as the native MoGe / Depth
         # Anything nodes use it (honors --fp16-text-enc & friends; fp8 text-enc flags
@@ -328,7 +363,7 @@ def load_depthpro2(name: str, precision: str, device: str) -> dict:
     patcher = comfy.model_patcher.CoreModelPatcher(
         model,
         load_device=load_device,
-        offload_device=torch.device("cpu"),
+        offload_device=offload_device,
         fast_disk=fast_disk,
     )
     return {
@@ -474,48 +509,54 @@ SENSOR_PRESETS = {
 }
 
 
-class DepthPro2FocalLength:
+class DepthPro2FocalLength(io.ComfyNode):
+    """A lens focal length (mm) to pixels for a known sensor size."""
+
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "focal_length_mm": ("FLOAT", {"default": 35.0, "min": 0.0, "step": 0.5}),
-                "sensor": (list(SENSOR_PRESETS), {"default": next(iter(SENSOR_PRESETS))}),
-                "sensor_width_mm": ("FLOAT", {"default": 36.0, "min": 0.1, "max": 100.0, "step": 0.01}),
-                "width": ("INT", {"default": 1920, "min": 1, "max": 16384}),
-            },
-            "optional": {"image": ("IMAGE",)},
-        }
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="DepthPro2FocalLength",
+            display_name="DepthPro2 Focal Length",
+            category=CATEGORY,
+            description=(
+                "Convert a physical lens focal length (mm, as engraved on the lens) to pixels for a "
+                "known sensor size, for cine/mirrorless cameras (ARRI, Blackmagic, Sony...). Link the "
+                "image to use its width, or set width manually. Pick a sensor preset or 'custom' "
+                "with sensor_width_mm; the conversion assumes the image spans the full sensor width "
+                "(for cropped readouts, use the width of the sensor area actually used). Link the "
+                "output to the focal_length_px input of the Estimate/Video nodes. For phone photos "
+                "and unknown cameras, use the focal_length_mm (35mm-equivalent) widget instead."
+            ),
+            inputs=[
+                io.Float.Input("focal_length_mm", default=35.0, min=0.0, step=0.5,
+                               tooltip="Focal length in mm, as engraved on the lens (or the 35mm-equivalent); "
+                                       "0 passes 0 through."),
+                io.Combo.Input("sensor", options=list(SENSOR_PRESETS), default=next(iter(SENSOR_PRESETS)),
+                               tooltip="The camera sensor (its width is what matters); 'custom' uses "
+                                       "sensor_width_mm."),
+                io.Float.Input("sensor_width_mm", default=36.0, min=0.1, max=100.0, step=0.01, advanced=True,
+                               tooltip="Sensor width in mm, used for the 'custom' sensor only."),
+                io.Int.Input("width", default=1920, min=1, max=16384, advanced=True,
+                             tooltip="Image width in pixels, when no image is linked."),
+                io.Image.Input("image", optional=True,
+                               tooltip="Link the image to use its width."),
+            ],
+            outputs=[
+                io.Float.Output(id="focal_length_px", display_name="focal_length_px",
+                                tooltip="Focal length in pixels of the image."),
+            ],
+        )
 
-    RETURN_TYPES = ("FLOAT",)
-    RETURN_NAMES = ("focal_length_px",)
-    FUNCTION = "convert"
-    CATEGORY = "depth/DepthPro2"
-    DESCRIPTION = (
-        "Convert a physical lens focal length (mm, as engraved on the lens) to pixels for a "
-        "known sensor size, for cine/mirrorless cameras (ARRI, Blackmagic, Sony...). Link the "
-        "image to use its width, or set width manually. Pick a sensor preset or 'custom' "
-        "with sensor_width_mm; the conversion assumes the image spans the full sensor width "
-        "(for cropped readouts, use the width of the sensor area actually used). Link the "
-        "output to the focal_length_px input of the Estimate/Video nodes. For phone photos "
-        "and unknown cameras, use the focal_length_mm (35mm-equivalent) widget instead."
-    )
-
-    def convert(
-        self,
-        focal_length_mm: float,
-        sensor: str,
-        sensor_width_mm: float,
-        width: int,
-        image: torch.Tensor | None = None,
-    ):
+    @classmethod
+    def execute(cls, focal_length_mm: float, sensor: str, sensor_width_mm: float, width: int,
+                image: torch.Tensor | None = None) -> io.NodeOutput:
         if image is not None:
             width = image.shape[2]
         preset = SENSOR_PRESETS[sensor]
         sensor_w = preset[0] if preset is not None else sensor_width_mm
         if focal_length_mm <= 0:
-            return (0.0,)
-        return (focal_length_mm * width / sensor_w,)
+            return io.NodeOutput(0.0)
+        return io.NodeOutput(focal_length_mm * width / sensor_w)
 
 
 def _prepare_frames(
@@ -661,135 +702,176 @@ def _depth_outputs(
     return image, depth, focal, sky
 
 
-class DepthPro2Loader:
+class DepthPro2Loader(io.ComfyNode):
+    """Load Apple Depth Pro 2 as the DEPTHPRO2_MODEL payload the estimate nodes consume."""
+
     @classmethod
-    def INPUT_TYPES(cls):
-        choices = list(HF_REPOS) + _local_weight_files()
-        return {
-            "required": {
-                "model": (choices, {"default": "depthpro2-s"}),
-                "precision": (["auto", "bf16", "fp16", "fp32", "fp8"], {"default": "auto"}),
-                "device": (["auto", "cuda", "mps", "cpu"], {"default": "auto"}),
-            }
-        }
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="DepthPro2Loader",
+            display_name="DepthPro2 Loader",
+            category=CATEGORY,
+            description=(
+                "Load Apple Depth Pro 2. Preset names download weights from Hugging Face into "
+                "models/depthpro2 on first use; local .safetensors/.pt files in that folder are also "
+                "listed. auto uses ComfyUI's session dtype for auxiliary models (fp16 on CUDA, as in "
+                "the native MoGe/Depth Anything nodes; honors --fp16-text-enc/--bf16-text-enc), fp16 is "
+                "the native default and bf16 Apple's training precision; fp8 stores encoder weights as "
+                "float8 with per-channel scales (about half the memory of bf16). The model is managed "
+                "by ComfyUI's model management: it rides in RAM and is evicted from the GPU when other "
+                "nodes need the VRAM."
+            ),
+            search_aliases=["depthpro2", "depth pro 2", "apple depth", "metric depth", "depth estimation"],
+            inputs=[
+                io.Combo.Input("model", options=list(HF_REPOS) + _local_weight_files(),
+                               default="depthpro2-s",
+                               tooltip="A preset (auto-downloaded into models/depthpro2 on first use) or "
+                                       "a local .safetensors/.pt file in that folder."),
+                io.Combo.Input("precision", options=["auto", "bf16", "fp16", "fp32", "fp8"], default="auto",
+                               tooltip="auto uses ComfyUI's session dtype; fp8 stores encoder weights as "
+                                       "float8 (about half the memory of bf16)."),
+                io.Combo.Input(
+                    "device", options=["auto", "cuda", "mps", "cpu"], default="auto",
+                    tooltip="auto uses ComfyUI's device policy for auxiliary models (the same "
+                            "one the native MoGe/Depth Anything loaders use: honors --gpu-only, "
+                            "falls back to the CPU on machines without usable VRAM); "
+                            "an explicit device is used as-is.",
+                ),
+            ],
+            outputs=[DEPTHPRO2_MODEL.Output(id="model", display_name="model")],
+        )
 
-    RETURN_TYPES = ("DEPTHPRO2_MODEL",)
-    RETURN_NAMES = ("model",)
-    FUNCTION = "load"
-    CATEGORY = "depth/DepthPro2"
-    DESCRIPTION = (
-        "Load Apple Depth Pro 2. Preset names download weights from Hugging Face into "
-        "models/depthpro2 on first use; local .safetensors/.pt files in that folder are also "
-        "listed. auto uses ComfyUI's session dtype for auxiliary models (fp16 on CUDA, as in "
-        "the native MoGe/Depth Anything nodes; honors --fp16-text-enc/--bf16-text-enc), fp16 is "
-        "the native default and bf16 Apple's training precision; fp8 stores encoder weights as "
-        "float8 with per-channel scales (about half the memory of bf16). The model is managed "
-        "by ComfyUI's model management: it rides in RAM and is evicted from the GPU when other "
-        "nodes need the VRAM."
-    )
-
-    def load(self, model: str, precision: str, device: str):
-        return (load_depthpro2(model, precision, device),)
-
-
-class DepthPro2Estimate:
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "model": ("DEPTHPRO2_MODEL",),
-                "image": ("IMAGE",),
-                "focal_length_mm": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.5}),
-                "max_size": ("INT", {"default": 0, "min": -1, "max": 16384, "step": 32}),
-            },
-            "optional": {"focal_length_px": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.1})},
-        }
+    def execute(cls, model: str, precision: str, device: str) -> io.NodeOutput:
+        return io.NodeOutput(load_depthpro2(model, precision, device))
 
-    RETURN_TYPES = ("IMAGE", "DEPTHPRO2_DEPTH", "FLOAT", "MASK")
-    RETURN_NAMES = ("depth_image", "depth_meters", "focal_length_px", "sky_mask")
-    FUNCTION = "estimate"
-    CATEGORY = "depth/DepthPro2"
-    DESCRIPTION = (
-        "Estimate metric depth for each image of the batch independently. depth_image is "
-        "normalized inverse depth (near white, far black) for preview/ControlNet; depth_meters "
-        "is raw metric depth (T, H, W) with inf at sky; sky is a MASK (1 at sky) for comp "
-        "holdouts. focal_length_mm is the lens focal length "
-        "as a 35mm-equivalent (e.g. 24, 35, 50 — the EXIF FocalLengthIn35mmFilm value); 0 "
-        "estimates it with the focal-length model. Depth in meters scales linearly with focal "
-        "length. max_size: 0 (default) picks the largest resolution that fits the free VRAM "
-        "automatically, -1 runs at native resolution (sharpest edges, may OOM on very large "
-        "images), any positive value caps the longest side processed; the output is always "
-        "upsampled back to the input size. The estimated processing memory is reserved through "
-        "ComfyUI's model management before the run, so other loaded models are evicted when "
-        "needed; if a frame still runs out of memory, the node retries at half the processing "
-        "size instead of crashing. For physical mm with a known "
-        "camera sensor, link the Focal Length node's focal_length_px output to the optional "
-        "focal_length_px input; it overrides focal_length_mm."
-    )
 
-    def estimate(
-        self,
-        model: dict,
-        image: torch.Tensor,
-        focal_length_mm: float,
-        max_size: int,
-        focal_length_px: float | None = None,
-    ):
+class DepthPro2Estimate(io.ComfyNode):
+    """Estimate metric depth for each image of the batch independently."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="DepthPro2Estimate",
+            display_name="DepthPro2 Estimate Depth",
+            category=CATEGORY,
+            description=(
+                "Estimate metric depth for each image of the batch independently. depth_image is "
+                "normalized inverse depth (near white, far black) for preview/ControlNet; depth_meters "
+                "is raw metric depth (T, H, W) with inf at sky; sky is a MASK (1 at sky) for comp "
+                "holdouts. focal_length_mm is the lens focal length "
+                "as a 35mm-equivalent (e.g. 24, 35, 50 — the EXIF FocalLengthIn35mmFilm value); 0 "
+                "estimates it with the focal-length model. Depth in meters scales linearly with focal "
+                "length. max_size: 0 (default) picks the largest resolution that fits the free VRAM "
+                "automatically, -1 runs at native resolution (sharpest edges, may OOM on very large "
+                "images), any positive value caps the longest side processed; the output is always "
+                "upsampled back to the input size. The estimated processing memory is reserved through "
+                "ComfyUI's model management before the run, so other loaded models are evicted when "
+                "needed; if a frame still runs out of memory, the node retries at half the processing "
+                "size instead of crashing. For physical mm with a known "
+                "camera sensor, link the Focal Length node's focal_length_px output to the optional "
+                "focal_length_px input; it overrides focal_length_mm."
+            ),
+            search_aliases=["depth", "metric depth", "depth estimation", "depthpro2"],
+            inputs=[
+                DEPTHPRO2_MODEL.Input("model"),
+                io.Image.Input("image", tooltip="An image, or a batch of images (each estimated independently)."),
+                io.Float.Input("focal_length_mm", default=0.0, min=0.0, step=0.5,
+                               tooltip="Lens focal length as a 35mm-equivalent (e.g. 24, 35, 50); 0 estimates "
+                                       "it with the focal-length model."),
+                io.Int.Input("max_size", default=0, min=-1, max=16384, step=32,
+                             tooltip="0 (default) picks the largest resolution that fits the free VRAM; -1 "
+                                     "runs at native resolution (may OOM on very large images); any positive "
+                                     "value caps the longest side processed. The output is always upsampled "
+                                     "back to the input size."),
+                io.Float.Input("focal_length_px", default=0.0, min=0.0, step=0.1, optional=True,
+                               tooltip="Focal length in pixels of the image, e.g. from the Focal Length node; "
+                                       "overrides focal_length_mm."),
+            ],
+            outputs=[
+                io.Image.Output(id="depth_image", display_name="depth_image",
+                                tooltip="Normalized inverse depth (near white, far black) for preview/ControlNet."),
+                DEPTHPRO2_DEPTH.Output(id="depth_meters", display_name="depth_meters",
+                                       tooltip="Raw metric depth (T, H, W) with inf at sky."),
+                io.Float.Output(id="focal_length_px", display_name="focal_length_px",
+                                tooltip="Focal length in pixels used for the run."),
+                io.Mask.Output(id="sky_mask", display_name="sky_mask",
+                               tooltip="1 at sky, 0 elsewhere; for comp holdouts."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, model: dict, image: torch.Tensor, focal_length_mm: float, max_size: int,
+                focal_length_px: float | None = None) -> io.NodeOutput:
         f_px = focal_length_px or _focal_mm_to_px(focal_length_mm, *image.shape[1:3])
         predictions, scale = _run_inference(model, image, f_px, max_size, "DepthPro2 estimate")
         mm.soft_empty_cache()
-        return _depth_outputs(predictions, tuple(image.shape[1:3]), scale)
+        return io.NodeOutput(*_depth_outputs(predictions, tuple(image.shape[1:3]), scale))
 
 
-class DepthPro2Video:
+class DepthPro2Video(io.ComfyNode):
+    """Temporally consistent depth for a video batch, in overlapping windows."""
+
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "model": ("DEPTHPRO2_MODEL",),
-                "images": ("IMAGE",),
-                "window": ("INT", {"default": 16, "min": 1, "max": 64}),
-                "overlap": ("INT", {"default": 4, "min": 0, "max": 63}),
-                "focal_length_mm": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.5}),
-                "max_size": ("INT", {"default": 0, "min": -1, "max": 16384, "step": 32}),
-                "mode": (["buffered", "unbuffered"], {"default": "buffered"}),
-            },
-            "optional": {"focal_length_px": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.1})},
-        }
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="DepthPro2Video",
+            display_name="DepthPro2 Video Depth",
+            category=CATEGORY,
+            description=(
+                "Temporally consistent depth for a video batch: frames are processed jointly in "
+                "overlapping windows and share one focal length. focal_length_mm is the 35mm-equivalent "
+                "focal length (0 estimates it from the first window). Lower window/overlap if you run out "
+                "of memory. depth_image is normalized over the whole batch so brightness is steady "
+                "across frames. buffered lets each frame also see later frames (overlap applies); "
+                "unbuffered predicts each frame from itself and the frames before it, at lower latency "
+                "and memory (overlap is ignored). max_size: 0 (default) picks the largest resolution "
+                "that fits the free VRAM automatically (accounting for the window), -1 runs at native "
+                "resolution, any positive value caps the longest side processed; the output is always "
+                "upsampled back to the input size. Frames are staged on the CPU and moved to the GPU "
+                "one window at a time, and the estimated processing memory is reserved through "
+                "ComfyUI's model management before the run, so other loaded models are evicted when "
+                "needed. Link the Focal Length node's focal_length_px output "
+                "to the optional focal_length_px input to override focal_length_mm with a sensor-aware "
+                "physical focal length."
+            ),
+            search_aliases=["depth", "metric depth", "video depth", "depth estimation", "depthpro2"],
+            inputs=[
+                DEPTHPRO2_MODEL.Input("model"),
+                io.Image.Input("images", tooltip="The video frames (an IMAGE batch)."),
+                io.Int.Input("window", default=16, min=1, max=64,
+                             tooltip="Frames attended together; lower it if you run out of memory."),
+                io.Int.Input("overlap", default=4, min=0, max=63, advanced=True,
+                             tooltip="Frames shared by consecutive clips (buffered mode only)."),
+                io.Float.Input("focal_length_mm", default=0.0, min=0.0, step=0.5,
+                               tooltip="35mm-equivalent focal length; 0 estimates it from the first window."),
+                io.Int.Input("max_size", default=0, min=-1, max=16384, step=32,
+                             tooltip="0 (default) picks the largest resolution that fits the free VRAM "
+                                     "(accounting for the window); -1 native; positive caps the longest "
+                                     "side. Output is upsampled back to the input size."),
+                io.Combo.Input("mode", options=["buffered", "unbuffered"], default="buffered", advanced=True,
+                               tooltip="buffered lets each frame also see later frames; unbuffered predicts "
+                                       "from the past only, at lower latency and memory."),
+                io.Float.Input("focal_length_px", default=0.0, min=0.0, step=0.1, optional=True,
+                               tooltip="Focal length in pixels, e.g. from the Focal Length node; overrides "
+                                       "focal_length_mm."),
+            ],
+            outputs=[
+                io.Image.Output(id="depth_image", display_name="depth_image",
+                                tooltip="Normalized inverse depth, steady across frames."),
+                DEPTHPRO2_DEPTH.Output(id="depth_meters", display_name="depth_meters",
+                                       tooltip="Raw metric depth (T, H, W) with inf at sky."),
+                io.Float.Output(id="focal_length_px", display_name="focal_length_px",
+                                tooltip="Focal length in pixels used for the run."),
+                io.Mask.Output(id="sky_mask", display_name="sky_mask",
+                               tooltip="1 at sky, 0 elsewhere; for comp holdouts."),
+            ],
+        )
 
-    RETURN_TYPES = ("IMAGE", "DEPTHPRO2_DEPTH", "FLOAT", "MASK")
-    RETURN_NAMES = ("depth_image", "depth_meters", "focal_length_px", "sky_mask")
-    FUNCTION = "estimate"
-    CATEGORY = "depth/DepthPro2"
-    DESCRIPTION = (
-        "Temporally consistent depth for a video batch: frames are processed jointly in "
-        "overlapping windows and share one focal length. focal_length_mm is the 35mm-equivalent "
-        "focal length (0 estimates it from the first window). Lower window/overlap if you run out "
-        "of memory. depth_image is normalized over the whole batch so brightness is steady "
-        "across frames. buffered lets each frame also see later frames (overlap applies); "
-        "unbuffered predicts each frame from itself and the frames before it, at lower latency "
-        "and memory (overlap is ignored). max_size: 0 (default) picks the largest resolution "
-        "that fits the free VRAM automatically (accounting for the window), -1 runs at native "
-        "resolution, any positive value caps the longest side processed; the output is always "
-        "upsampled back to the input size. Frames are staged on the CPU and moved to the GPU "
-        "one window at a time, and the estimated processing memory is reserved through "
-        "ComfyUI's model management before the run, so other loaded models are evicted when "
-        "needed. Link the Focal Length node's focal_length_px output "
-        "to the optional focal_length_px input to override focal_length_mm with a sensor-aware "
-        "physical focal length."
-    )
-
-    def estimate(
-        self,
-        model: dict,
-        images: torch.Tensor,
-        window: int,
-        overlap: int,
-        focal_length_mm: float,
-        max_size: int,
-        mode: str = "buffered",
-        focal_length_px: float | None = None,
-    ):
+    @classmethod
+    def execute(cls, model: dict, images: torch.Tensor, window: int, overlap: int,
+                focal_length_mm: float, max_size: int, mode: str = "buffered",
+                focal_length_px: float | None = None) -> io.NodeOutput:
         if mode == "buffered" and overlap >= window:
             raise ValueError("overlap must be smaller than window.")
         f_px = focal_length_px or _focal_mm_to_px(focal_length_mm, *images.shape[1:3])
@@ -808,68 +890,75 @@ class DepthPro2Video:
             hi = inverse[finite].max()
             if hi > lo:
                 image = ((inverse - lo) / (hi - lo)).clamp(0, 1).unsqueeze(-1).repeat(1, 1, 1, 3)
-        return image, depth, focal_out, sky
+        return io.NodeOutput(image, depth, focal_out, sky)
 
 
-class DepthPro2Colorize:
+class DepthPro2Colorize(io.ComfyNode):
+    """Color preview of metric depth, as in Apple's CLI."""
+
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "depth": ("DEPTHPRO2_DEPTH",),
-                "colormap": (list(COLORMAPS), {"default": "turbo"}),
-            }
-        }
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="DepthPro2Colorize",
+            display_name="DepthPro2 Colorize Depth",
+            category=CATEGORY,
+            description=(
+                "Color preview of metric depth, as in Apple's CLI: turbo maps dark blue at infinitely "
+                "far to red/white near. The scale is fixed by the first frame's nearest point plus 20% "
+                "headroom, so a video stays steady and points coming nearer later saturate. gray uses "
+                "the same scale in grayscale (white near, black infinitely far)."
+            ),
+            inputs=[
+                DEPTHPRO2_DEPTH.Input("depth"),
+                io.Combo.Input("colormap", options=list(COLORMAPS), default="turbo"),
+            ],
+            outputs=[io.Image.Output(id="depth_color", display_name="depth_color")],
+        )
 
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("depth_color",)
-    FUNCTION = "colorize"
-    CATEGORY = "depth/DepthPro2"
-    DESCRIPTION = (
-        "Color preview of metric depth, as in Apple's CLI: turbo maps dark blue at infinitely "
-        "far to red/white near. The scale is fixed by the first frame's nearest point plus 20% "
-        "headroom, so a video stays steady and points coming nearer later saturate. gray uses "
-        "the same scale in grayscale (white near, black infinitely far)."
-    )
-
-    def colorize(self, depth: torch.Tensor, colormap: str):
+    @classmethod
+    def execute(cls, depth: torch.Tensor, colormap: str) -> io.NodeOutput:
         inverse = inverse_metric(depth)
-        return (colorize(inverse, colormap, color_scale(inverse)),)
+        return io.NodeOutput(colorize(inverse, colormap, color_scale(inverse)))
 
 
-class DepthPro2PositionPass:
+class DepthPro2PositionPass(io.ComfyNode):
+    """Camera-space position pass in meters, back-projected from metric depth."""
+
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "depth": ("DEPTHPRO2_DEPTH",),
-                "focal_length_px": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.1}),
-                "max_depth": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.5}),
-                "cx_offset": ("FLOAT", {"default": 0.0, "min": -4096.0, "max": 4096.0, "step": 0.5}),
-                "cy_offset": ("FLOAT", {"default": 0.0, "min": -4096.0, "max": 4096.0, "step": 0.5}),
-            }
-        }
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="DepthPro2PositionPass",
+            display_name="DepthPro2 Position Pass",
+            category=CATEGORY,
+            description=(
+                "Camera-space position pass in meters: X right, Y down, Z along the viewing direction, "
+                "back-projected from metric depth with focal_length_px (link it from the estimate node) "
+                "and the image center as principal point, shifted by cx_offset/cy_offset for calibrated "
+                "cameras. Sky and pixels beyond max_depth (0 = no clip) are zero with valid = 0; clip "
+                "before making point clouds, as sky depth is unreliable."
+            ),
+            inputs=[
+                DEPTHPRO2_DEPTH.Input("depth"),
+                io.Float.Input("focal_length_px", default=0.0, min=0.0, step=0.1,
+                               tooltip="Focal length in pixels; link it from the estimate node."),
+                io.Float.Input("max_depth", default=0.0, min=0.0, step=0.5, advanced=True,
+                               tooltip="Clip beyond this many meters (0 = no clip); sky depth is unreliable."),
+                io.Float.Input("cx_offset", default=0.0, min=-4096.0, max=4096.0, step=0.5, advanced=True,
+                               tooltip="Principal point offset from the image center, in pixels (x)."),
+                io.Float.Input("cy_offset", default=0.0, min=-4096.0, max=4096.0, step=0.5, advanced=True,
+                               tooltip="Principal point offset from the image center, in pixels (y)."),
+            ],
+            outputs=[
+                io.Image.Output(id="position_xyz", display_name="position_xyz",
+                                tooltip="Camera-space position in meters (X right, Y down, Z forward)."),
+                io.Mask.Output(id="valid", display_name="valid",
+                               tooltip="1 where a valid point was written, 0 at sky/clipped pixels."),
+            ],
+        )
 
-    RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("position_xyz", "valid")
-    FUNCTION = "position"
-    CATEGORY = "depth/DepthPro2"
-    DESCRIPTION = (
-        "Camera-space position pass in meters: X right, Y down, Z along the viewing direction, "
-        "back-projected from metric depth with focal_length_px (link it from the estimate node) "
-        "and the image center as principal point, shifted by cx_offset/cy_offset for calibrated "
-        "cameras. Sky and pixels beyond max_depth (0 = no clip) are zero with valid = 0; clip "
-        "before making point clouds, as sky depth is unreliable."
-    )
-
-    def position(
-        self,
-        depth: torch.Tensor,
-        focal_length_px: float,
-        max_depth: float,
-        cx_offset: float,
-        cy_offset: float,
-    ):
+    @classmethod
+    def execute(cls, depth: torch.Tensor, focal_length_px: float, max_depth: float,
+                cx_offset: float, cy_offset: float) -> io.NodeOutput:
         if focal_length_px <= 0:
             raise ValueError("focal_length_px must be positive; link it from the estimate node.")
         height, width = depth.shape[-2:]
@@ -881,31 +970,34 @@ class DepthPro2PositionPass:
         v = torch.arange(height, dtype=torch.float32) + 0.5 - (height / 2 + cy_offset)
         x = z * u.view(1, 1, width) / focal_length_px
         y = z * v.view(1, height, 1) / focal_length_px
-        return (torch.stack([x, y, z], dim=-1), valid.to(torch.float32))
+        return io.NodeOutput(torch.stack([x, y, z], dim=-1), valid.to(torch.float32))
 
 
-class DepthPro2Save16:
+class DepthPro2Save16(io.ComfyNode):
+    """Save inverse metric depth as 16-bit grayscale PNGs."""
+
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "depth": ("DEPTHPRO2_DEPTH",),
-                "filename_prefix": ("STRING", {"default": "depthpro2/depth16"}),
-            }
-        }
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="DepthPro2Save16",
+            display_name="DepthPro2 Save 16-bit Depth",
+            category=CATEGORY,
+            is_output_node=True,
+            description=(
+                "Save inverse metric depth as 16-bit grayscale PNGs (white near, black infinitely far) "
+                "on the color preview's scale, for compositing tools: read as raw data (Raw in Nuke, "
+                "Non-Color in Blender). Depth in meters = k / value; k is logged and stored in each "
+                "PNG's depthpro2_k text chunk. 0 is infinitely far. Shows an 8-bit preview on the node."
+            ),
+            inputs=[
+                DEPTHPRO2_DEPTH.Input("depth"),
+                io.String.Input("filename_prefix", default="depthpro2/depth16"),
+            ],
+            outputs=[],
+        )
 
-    RETURN_TYPES = ()
-    OUTPUT_NODE = True
-    FUNCTION = "save"
-    CATEGORY = "depth/DepthPro2"
-    DESCRIPTION = (
-        "Save inverse metric depth as 16-bit grayscale PNGs (white near, black infinitely far) "
-        "on the color preview's scale, for compositing tools: read as raw data (Raw in Nuke, "
-        "Non-Color in Blender). Depth in meters = k / value; k is logged and stored in each "
-        "PNG's depthpro2_k text chunk. 0 is infinitely far. Shows an 8-bit preview on the node."
-    )
-
-    def save(self, depth: torch.Tensor, filename_prefix: str):
+    @classmethod
+    def execute(cls, depth: torch.Tensor, filename_prefix: str) -> io.NodeOutput:
         from PIL import Image
         from PIL.PngImagePlugin import PngInfo
 
@@ -916,8 +1008,7 @@ class DepthPro2Save16:
         folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
             filename_prefix, folder_paths.get_output_directory(), width, height
         )
-        temp_dir = Path(folder_paths.get_temp_directory())
-        previews = []
+        normalized_frames = []
         for frame in inverse:
             normalized = (frame / scale).clamp(0, 1)
             values = normalized.mul(65535).round().to(torch.uint16).numpy()
@@ -925,49 +1016,52 @@ class DepthPro2Save16:
             meta.add_text("depthpro2_k", f"{k:.6g}")
             path = Path(folder) / f"{filename}_{counter:05d}.png"
             Image.fromarray(values).save(path, pnginfo=meta, compress_level=1)
-            preview_name = f"{filename}_{counter:05d}_preview.png"
-            preview = normalized.mul(255).round().to(torch.uint8).numpy()
-            Image.fromarray(preview).save(temp_dir / preview_name, compress_level=1)
-            previews.append({"filename": preview_name, "subfolder": "", "type": "temp"})
+            normalized_frames.append(normalized)
             counter += 1
         LOGGER.info("DepthPro2 16-bit: depth in meters = %.2f / value, 0 is infinitely far.", k)
-        return {"ui": {"images": previews}}
+        preview = torch.stack(normalized_frames).unsqueeze(-1).repeat(1, 1, 1, 3)
+        return io.NodeOutput(ui=ui.PreviewImage(preview, cls=cls))
 
 
-class DepthPro2SaveFloat:
+class DepthPro2SaveFloat(io.ComfyNode):
+    """Save metric depth in meters as 32-bit float EXR/TIFF."""
+
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "depth": ("DEPTHPRO2_DEPTH",),
-                "filename_prefix": ("STRING", {"default": "depthpro2/depth_float"}),
-                "format": (["exr", "tiff"], {"default": "exr"}),
-                "sky_value": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 100.0}),
-            },
-            "optional": {"focal_length_px": ("FLOAT", {"default": 0.0, "min": 0.0, "step": 0.1})},
-        }
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="DepthPro2SaveFloat",
+            display_name="DepthPro2 Save Float Depth",
+            category=CATEGORY,
+            is_output_node=True,
+            description=(
+                "Save metric depth in meters as 32-bit float for compositing (Nuke, Fusion, Blender): "
+                "single-channel EXR (channel Z, needs the optional OpenEXR package: pip install OpenEXR) "
+                "or float32 TIFF with no extra dependencies. Unlike the 16-bit node this is lossless and "
+                "stores true meters, not an inverse scale. sky_value replaces sky/invalid pixels with a "
+                "far distance (0 keeps infinity). Link focal_length_px from the estimate node to embed "
+                "it, with units and sky convention, in the file metadata. Shows an 8-bit preview."
+            ),
+            inputs=[
+                DEPTHPRO2_DEPTH.Input("depth"),
+                io.String.Input("filename_prefix", default="depthpro2/depth_float"),
+                io.Combo.Input("format", options=["exr", "tiff"], default="exr"),
+                io.Float.Input("sky_value", default=0.0, min=0.0, step=100.0, advanced=True,
+                               tooltip="Replace sky/invalid pixels with this far distance (0 keeps infinity)."),
+                io.Float.Input("focal_length_px", default=0.0, min=0.0, step=0.1, optional=True,
+                               tooltip="Link it from the estimate node to embed it in the file metadata."),
+            ],
+            outputs=[],
+        )
 
-    RETURN_TYPES = ()
-    OUTPUT_NODE = True
-    FUNCTION = "save"
-    CATEGORY = "depth/DepthPro2"
-    DESCRIPTION = (
-        "Save metric depth in meters as 32-bit float for compositing (Nuke, Fusion, Blender): "
-        "single-channel EXR (channel Z, needs the optional OpenEXR package: pip install OpenEXR) "
-        "or float32 TIFF with no extra dependencies. Unlike the 16-bit node this is lossless and "
-        "stores true meters, not an inverse scale. sky_value replaces sky/invalid pixels with a "
-        "far distance (0 keeps infinity). Link focal_length_px from the estimate node to embed "
-        "it, with units and sky convention, in the file metadata. Shows an 8-bit preview."
-    )
-
-    def save(
-        self,
+    @classmethod
+    def execute(
+        cls,
         depth: torch.Tensor,
         filename_prefix: str,
         format: str,
         sky_value: float,
         focal_length_px: float | None = None,
-    ):
+    ) -> io.NodeOutput:
         from PIL import Image
 
         meters = depth.float().cpu().clone()
@@ -994,10 +1088,9 @@ class DepthPro2SaveFloat:
                     "EXR export needs the OpenEXR package (pip install OpenEXR), "
                     "or choose the tiff format."
                 ) from e
-        temp_dir = Path(folder_paths.get_temp_directory())
         inverse = inverse_metric(depth)
         scale = color_scale(inverse)
-        previews = []
+        preview_frames = []
         for i, frame in enumerate(meters):
             path = Path(folder) / f"{filename}_{counter:05d}{ext}"
             if format == "exr":
@@ -1019,46 +1112,48 @@ class DepthPro2SaveFloat:
                 if focal > 0:
                     info[65002] = f"{focal:.6g}"
                 Image.fromarray(frame.numpy()).save(path, tiffinfo=info)
-            preview_name = f"{filename}_{counter:05d}_float_preview.png"
-            preview = (inverse[i] / scale).clamp(0, 1).mul(255).round().to(torch.uint8).numpy()
-            Image.fromarray(preview).save(temp_dir / preview_name, compress_level=1)
-            previews.append({"filename": preview_name, "subfolder": "", "type": "temp"})
+            preview_frames.append((inverse[i] / scale).clamp(0, 1))
             counter += 1
         LOGGER.info("DepthPro2 float depth: %s, meters, sky = %s.", path, sky_desc)
-        return {"ui": {"images": previews}}
+        preview = torch.stack(preview_frames).unsqueeze(-1).repeat(1, 1, 1, 3)
+        return io.NodeOutput(ui=ui.PreviewImage(preview, cls=cls))
 
 
-class DepthPro2SavePLY:
+class DepthPro2SavePLY(io.ComfyNode):
+    """Write a metric point cloud (binary PLY, in meters) from the Position Pass outputs."""
+
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "position": ("IMAGE",),
-                "valid": ("MASK",),
-                "filename_prefix": ("STRING", {"default": "depthpro2/points"}),
-            },
-            "optional": {"image": ("IMAGE",)},
-        }
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="DepthPro2SavePLY",
+            display_name="DepthPro2 Save PLY",
+            category=CATEGORY,
+            is_output_node=True,
+            description=(
+                "Write a metric point cloud (binary PLY, in meters) from the Position Pass outputs: "
+                "link position_xyz and valid; only valid points are written, sky and clipped pixels "
+                "are dropped. Link the original image to color the points. Coordinates are camera-space "
+                "(X right, Y down, Z forward) — flip Y in DCCs that expect Y up. Opens in MeshLab, "
+                "Blender and CloudCompare."
+            ),
+            inputs=[
+                io.Image.Input("position", tooltip="The Position Pass position_xyz output (T, H, W, 3)."),
+                io.Mask.Input("valid", tooltip="The Position Pass valid output."),
+                io.String.Input("filename_prefix", default="depthpro2/points"),
+                io.Image.Input("image", optional=True,
+                               tooltip="The original image, to color the points."),
+            ],
+            outputs=[],
+        )
 
-    RETURN_TYPES = ()
-    OUTPUT_NODE = True
-    FUNCTION = "save"
-    CATEGORY = "depth/DepthPro2"
-    DESCRIPTION = (
-        "Write a metric point cloud (binary PLY, in meters) from the Position Pass outputs: "
-        "link position_xyz and valid; only valid points are written, sky and clipped pixels "
-        "are dropped. Link the original image to color the points. Coordinates are camera-space "
-        "(X right, Y down, Z forward) — flip Y in DCCs that expect Y up. Opens in MeshLab, "
-        "Blender and CloudCompare."
-    )
-
-    def save(
-        self,
+    @classmethod
+    def execute(
+        cls,
         position: torch.Tensor,
         valid: torch.Tensor,
         filename_prefix: str,
         image: torch.Tensor | None = None,
-    ):
+    ) -> io.NodeOutput:
         import numpy as np
 
         if position.ndim != 4 or position.shape[-1] != 3:
@@ -1092,28 +1187,4 @@ class DepthPro2SavePLY:
             path.write_bytes(header.encode("ascii") + record.tobytes())
             LOGGER.info("DepthPro2 PLY: %s (%d points, meters).", path, len(points))
             counter += 1
-        return ()
-
-
-NODE_CLASS_MAPPINGS = {
-    "DepthPro2Loader": DepthPro2Loader,
-    "DepthPro2Estimate": DepthPro2Estimate,
-    "DepthPro2Video": DepthPro2Video,
-    "DepthPro2FocalLength": DepthPro2FocalLength,
-    "DepthPro2Colorize": DepthPro2Colorize,
-    "DepthPro2PositionPass": DepthPro2PositionPass,
-    "DepthPro2Save16": DepthPro2Save16,
-    "DepthPro2SaveFloat": DepthPro2SaveFloat,
-    "DepthPro2SavePLY": DepthPro2SavePLY,
-}
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "DepthPro2Loader": "DepthPro2 Loader",
-    "DepthPro2Estimate": "DepthPro2 Estimate Depth",
-    "DepthPro2Video": "DepthPro2 Video Depth",
-    "DepthPro2FocalLength": "DepthPro2 Focal Length",
-    "DepthPro2Colorize": "DepthPro2 Colorize Depth",
-    "DepthPro2PositionPass": "DepthPro2 Position Pass",
-    "DepthPro2Save16": "DepthPro2 Save 16-bit Depth",
-    "DepthPro2SaveFloat": "DepthPro2 Save Float Depth",
-    "DepthPro2SavePLY": "DepthPro2 Save PLY Points",
-}
+        return io.NodeOutput()
