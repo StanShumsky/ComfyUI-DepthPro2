@@ -30,7 +30,10 @@ LOGGER = logging.getLogger(__name__)
 MODELS_DIR = Path(folder_paths.models_dir) / "depthpro2"
 folder_paths.add_model_folder_path("depthpro2", str(MODELS_DIR))
 
-CATEGORY = "depth/DepthPro2"
+# The native placement: the loader sits with the model loaders, the rest with the
+# geometry estimation models (as the native MoGe / Depth Anything nodes do).
+LOADER_CATEGORY = "model/loaders"
+CATEGORY = "image/geometry estimation"
 DEPTHPRO2_MODEL = io.Custom("DEPTHPRO2_MODEL")
 DEPTHPRO2_DEPTH = io.Custom("DEPTHPRO2_DEPTH")
 
@@ -710,7 +713,7 @@ class DepthPro2Loader(io.ComfyNode):
         return io.Schema(
             node_id="DepthPro2Loader",
             display_name="DepthPro2 Loader",
-            category=CATEGORY,
+            category=LOADER_CATEGORY,
             description=(
                 "Load Apple Depth Pro 2. Preset names download weights from Hugging Face into "
                 "models/depthpro2 on first use; local .safetensors/.pt files in that folder are also "

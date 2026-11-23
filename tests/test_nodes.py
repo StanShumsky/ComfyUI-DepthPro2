@@ -40,7 +40,10 @@ def test_node_schemas(node_classes):
         # GET_SCHEMA finalizes and validates the definition the way ComfyUI does on load.
         schema = cls.GET_SCHEMA()
         assert schema.node_id == name
-        assert schema.display_name and schema.category == "depth/DepthPro2"
+        assert schema.display_name
+        # The native placement: the loader with the model loaders, the rest with the
+        # geometry estimation models (as the native MoGe / Depth Anything nodes do).
+        assert schema.category == ("model/loaders" if name == "DepthPro2Loader" else "image/geometry estimation")
         assert schema.description
         assert callable(cls.execute)
         # Every schema input name must be an execute() parameter (and vice versa, for the
