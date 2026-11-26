@@ -1,3 +1,4 @@
 # Development-only files: keep them in git, out of the published registry archive.
 tests/
+scripts/
 requirements-dev.txt

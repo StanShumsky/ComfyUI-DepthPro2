@@ -6,12 +6,14 @@ import json
 import logging
 import math
 import os
-import shutil
+import re
+import threading
+import time
 from pathlib import Path
 
 import torch
 from torch.nn import functional as F
-from safetensors import safe_open
+from safetensors import SafetensorError, safe_open
 
 import folder_paths
 import comfy.model_management as mm
@@ -22,6 +24,7 @@ from tqdm.auto import tqdm
 
 from .depth_pro_2 import PRESETS, DepthPro2
 from .depth_pro_2.model import to_normalized_tensor
+from .depth_pro_2.network.fov import FOVEstimator
 from .colormaps import COLORMAPS, color_scale, colorize, inverse_metric
 from .fp8 import QuantizedLinear, quantize_linears
 
@@ -44,6 +47,13 @@ HF_REPOS = {
     "depthpro2-h": "apple/DepthPro2-H",
 }
 FOCAL_REPO = "apple/DepthPro2-focal"
+HF_REVISIONS = {
+    "apple/DepthPro2-S": "903a1c1ade918831d138adcc4aedbcc8f4da0078",
+    "apple/DepthPro2-B": "85e67fdfb7f5b36a6f6c4495e6789d331b1d8a04",
+    "apple/DepthPro2-L": "849dc5461267e0bc006ec63ab46920ea1ed98702",
+    "apple/DepthPro2-H": "68426c789f75a7c760273e857222625b4fe69576",
+    "apple/DepthPro2-focal": "622659d44a2002cf9ae4333f2569afa938290d9a",
+}
 
 DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
 
@@ -76,25 +86,25 @@ def _find_model_dir(name: str) -> Path | None:
     return None
 
 
-def _purge_model(name: str) -> None:
-    """Delete every cached copy of a model, including Hugging Face's resume metadata."""
-    for base in _model_dirs():
-        folder = base / name
-        if folder.exists():
-            LOGGER.warning("DepthPro2: removing %s", folder)
-            shutil.rmtree(folder, ignore_errors=True)
+def _quarantine_weight(path: Path) -> None:
+    """Preserve an unreadable weight beside the fresh download instead of deleting user data."""
+    if not path.exists():
+        return
+    backup = path.with_name(f"{path.name}.corrupt-{time.time_ns()}")
+    path.replace(backup)
+    LOGGER.warning("DepthPro2: preserved unreadable weights as %s", backup)
 
 
 def _download_repo(repo_id: str, name: str, force: bool = False) -> Path:
     from huggingface_hub import snapshot_download
 
+    local = _model_dirs()[0] / name
     if force:
-        _purge_model(name)
+        _quarantine_weight(local / "model.safetensors")
     else:
         found = _find_model_dir(name)
         if found is not None:
             return found
-    local = _model_dirs()[0] / name
     local.mkdir(parents=True, exist_ok=True)
     LOGGER.info("Downloading %s to %s", repo_id, local)
     snapshot_download(
@@ -102,6 +112,7 @@ def _download_repo(repo_id: str, name: str, force: bool = False) -> Path:
         allow_patterns=["config.json", "model.safetensors", "LICENSE"],
         local_dir=str(local),
         force_download=force,
+        revision=HF_REVISIONS[repo_id],
     )
     if not (local / "model.safetensors").exists():
         raise FileNotFoundError(f"Download of {repo_id} did not produce {local / 'model.safetensors'}.")
@@ -127,9 +138,18 @@ def _local_weight_files() -> list[str]:
 
 
 def _find_local_file(name: str) -> Path:
+    relative = Path(name)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"Weight file path must stay inside the model directories: {name!r}.")
     for base in _model_dirs():
-        if (base / name).is_file():
-            return base / name
+        root = base.resolve()
+        candidate = (root / relative).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            raise ValueError(f"Weight file path resolves outside the model directories: {name!r}.") from None
+        if candidate.is_file():
+            return candidate
     raise FileNotFoundError(
         f"Weight file {name!r} not found in any of: {[str(d) for d in _model_dirs()]}"
     )
@@ -195,7 +215,7 @@ def _load_repo_verified(
             state_dict = _load_state_dict(local / "model.safetensors", dtype)
             _check_weights(state_dict, name, path)
             return local, state_dict
-        except Exception as error:  # truncated safetensors raise their own error type
+        except (SafetensorError, ValueError) as error:
             last_error = error
             if attempt == 0:
                 LOGGER.warning("DepthPro2: %s; re-downloading %s.", error, name)
@@ -265,8 +285,8 @@ def _detect_preset(state_dict: dict[str, torch.Tensor]) -> str:
 
 def _resolve_weights(
     name: str, dtype: torch.dtype
-) -> tuple[dict, dict[str, torch.Tensor], dict[str, torch.Tensor] | None]:
-    """Return (config kwargs, state dict in ``dtype``, focal state dict or None)."""
+) -> tuple[dict, dict[str, torch.Tensor]]:
+    """Return config kwargs and the main-model state dict in ``dtype``."""
     if name in HF_REPOS:
         local, state_dict = _load_repo_verified(HF_REPOS[name], name, dtype)
         _annotate_source(state_dict, str(local / "model.safetensors"))
@@ -296,12 +316,7 @@ def _resolve_weights(
                     "dim_decoder",
                 )
             }
-    has_fov = any(key.startswith("fov.") for key in state_dict)
-    focal_state = None
-    if not has_fov:
-        focal_local, focal_state = _load_repo_verified(FOCAL_REPO, "depthpro2-focal", dtype)
-        _annotate_source(focal_state, str(focal_local / "model.safetensors"))
-    return config, state_dict, focal_state
+    return config, state_dict
 
 
 def _cast_storage(model: torch.nn.Module, dtype: torch.dtype) -> None:
@@ -322,6 +337,11 @@ def load_depthpro2(name: str, precision: str, device: str) -> dict:
         # aimdo and the session VRAM state (a NO_VRAM session runs the model on the CPU).
         load_device = mm.text_encoder_device()
         offload_device = mm.text_encoder_offload_device()
+        # Text encoders stay on CPU in SHARED sessions; this model should use the accelerator.
+        if load_device.type == "cpu" and mm.vram_state == mm.VRAMState.SHARED:
+            accelerator = mm.get_torch_device()
+            if accelerator.type != "cpu":
+                load_device = accelerator
     else:
         load_device = torch.device(device)
         offload_device = torch.device("cpu")
@@ -338,7 +358,9 @@ def load_depthpro2(name: str, precision: str, device: str) -> dict:
     compute_dtype = DTYPES["bf16" if precision == "fp8" else precision]
     if precision == "fp8" and load_device.type == "cpu":
         compute_dtype = torch.float32
-    config, state_dict, focal_state = _resolve_weights(name, compute_dtype)
+    config, state_dict = _resolve_weights(name, compute_dtype)
+    preset = _detect_preset(state_dict)
+    has_fov = any(key.startswith("fov.") for key in state_dict)
 
     # Build in system RAM and hand the weights to ComfyUI's model management (the
     # native pattern for auxiliary models): the model rides in the offload device until
@@ -349,7 +371,7 @@ def load_depthpro2(name: str, precision: str, device: str) -> dict:
     # the offload device, never in fp32).
     model = DepthPro2(
         **{key: value for key, value in config.items() if key != "fov"},
-        fov=focal_state is not None or any(k.startswith("fov.") for k in state_dict),
+        fov=has_fov,
         precision=compute_dtype,
     )
     if compute_dtype != torch.float32:
@@ -358,11 +380,9 @@ def load_depthpro2(name: str, precision: str, device: str) -> dict:
         _cast_storage(model.decoder, compute_dtype)
         if model.fov is not None:
             _cast_storage(model.fov.trunk, compute_dtype)
-    if focal_state is not None:
-        state_dict.update({f"fov.{k}": v for k, v in focal_state.items()})
     model.load_state_dict(state_dict, strict=True)
     fast_disk = _fast_disk(state_dict)
-    del state_dict, focal_state
+    del state_dict
 
     if precision == "fp8":
         count = quantize_linears(model.encoder, compute_dtype)
@@ -375,13 +395,47 @@ def load_depthpro2(name: str, precision: str, device: str) -> dict:
         offload_device=offload_device,
         fast_disk=fast_disk,
     )
-    return {
+    wrapper = {
         "model": model,
         "patcher": patcher,
         "device": load_device,
-        "name": name,
+        "name": preset,
         "precision": precision,
+        "focal_pending": not has_fov,
+        "_focal_lock": threading.Lock(),
     }
+    model._focal_loader = lambda: _ensure_focal_model(wrapper)
+    return wrapper
+
+
+def _ensure_focal_model(model: dict) -> None:
+    """Load the separate focal estimator once, only when inference needs it."""
+    net = model["model"]
+    if net.fov is not None or not model.get("focal_pending"):
+        return
+    with model["_focal_lock"]:
+        if net.fov is not None:
+            return
+        patcher = model["patcher"]
+        if patcher in mm.loaded_models():
+            patcher.detach()
+        precision = model["precision"]
+        compute_dtype = DTYPES["bf16" if precision == "fp8" else precision]
+        if precision == "fp8" and model["device"].type == "cpu":
+            compute_dtype = torch.float32
+        focal_local, focal_state = _load_repo_verified(
+            FOCAL_REPO, "depthpro2-focal", compute_dtype
+        )
+        _annotate_source(focal_state, str(focal_local / "model.safetensors"))
+        fov = FOVEstimator(compute_dtype)
+        if compute_dtype != torch.float32:
+            _cast_storage(fov.trunk, compute_dtype)
+        fov.load_state_dict(focal_state, strict=True)
+        net.fov = fov.to(net.weight_device).eval()
+        patcher.size = 0
+        patcher.fast_disk = getattr(patcher, "fast_disk", False) and _fast_disk(focal_state)
+        model["focal_pending"] = False
+        del focal_state
 
 
 # Boundary MP per preset: the input size at which one bf16 image forward consumes the
@@ -432,17 +486,32 @@ AUTO_MARGIN_GIB = 2.5
 MIN_AUTO_MPS = 2.0
 
 
-def _auto_max_size(model: dict, height: int, width: int, window: int = 1) -> int:
-    """The "auto" max_size policy: largest longest side that fits the free VRAM.
+def _mps_available_memory() -> int | None:
+    """Metal working-set headroom, excluding reusable MPS allocator caches."""
+    recommended = getattr(torch.mps, "recommended_max_memory", None)
+    active = getattr(torch.mps, "current_allocated_memory", None)
+    if not callable(recommended) or not callable(active):
+        return None
+    return max(0, recommended() - active())
 
-    Returns 0 when the native resolution already fits (or on CPU/MPS, where there is
-    no VRAM budget to respect).
+
+def _auto_max_size(model: dict, height: int, width: int, window: int = 1) -> int:
+    """The "auto" max_size policy: largest longest side that fits available device memory.
+
+    Returns 0 when the native resolution fits or no device budget is available.
     """
     device = model["device"]
-    if device.type != "cuda":
+    if device.type not in ("cuda", "mps"):
         return 0
     boundary = _window_boundary(model["name"], window)
-    free_gib = mm.get_free_memory(device) / 2**30
+    if device.type == "mps":
+        mps_free = _mps_available_memory()
+        if mps_free is None:
+            return 0
+        free_bytes = mps_free
+    else:
+        free_bytes = mm.get_free_memory(device)
+    free_gib = free_bytes / 2**30
     if model["patcher"] not in mm.loaded_models():
         # The weights are not on the GPU yet: account for them so the policy reads the
         # same whether measured before or after the model load.
@@ -450,7 +519,7 @@ def _auto_max_size(model: dict, height: int, width: int, window: int = 1) -> int
     budget = free_gib - AUTO_MARGIN_GIB
     if budget <= 0.0:
         raise RuntimeError(
-            f"DepthPro2: only {free_gib:.1f} GiB of VRAM is free; the model needs at "
+            f"DepthPro2: only {free_gib:.1f} GiB of device memory is free; the model needs at "
             f"least ~{AUTO_MARGIN_GIB + 1:.0f} GiB headroom. Free other models, choose a "
             "smaller preset, or use the fp8 precision."
         )
@@ -465,13 +534,13 @@ def _auto_max_size(model: dict, height: int, width: int, window: int = 1) -> int
 
 
 def _resolve_max_size(model: dict, image: torch.Tensor, max_size: int, window: int = 1) -> int:
-    """Widget value -> processing longest-side cap (0 = native resolution)."""
+    """Widget value -> processing longest-side cap (0 = budget-aware auto, negative = native)."""
     if max_size != 0:
         return 0 if max_size < 0 else max_size
     capped = _auto_max_size(model, *image.shape[1:3], window=window)
     if capped > 0:
         LOGGER.info(
-            "DepthPro2: auto resolution capped %dx%d to longest side %d to fit the free VRAM.",
+            "DepthPro2: auto resolution capped %dx%d to longest side %d to fit available device memory.",
             image.shape[2], image.shape[1], capped,
         )
     return capped
@@ -504,9 +573,21 @@ def _activation_bytes(model: dict, height: int, width: int, side: int, window: i
 
 def _focal_mm_to_px(focal_mm: float, height: int, width: int) -> float:
     """35mm-equivalent focal length -> pixels of the input image (35mm frame: 36x24mm)."""
-    if focal_mm <= 0:
+    if not math.isfinite(focal_mm) or focal_mm < 0:
+        raise ValueError("focal_length_mm must be a finite non-negative number.")
+    if focal_mm == 0:
         return 0.0
     return focal_mm * math.hypot(width, height) / math.hypot(36.0, 24.0)
+
+
+def _resolve_focal_px(
+    focal_mm: float, height: int, width: int, focal_px: float | None
+) -> float:
+    if focal_px is None:
+        return _focal_mm_to_px(focal_mm, height, width)
+    if not math.isfinite(focal_px) or focal_px < 0:
+        raise ValueError("focal_length_px must be a finite non-negative number.")
+    return float(focal_px)
 
 
 # Sensor width is what matters for focal conversion; heights are listed for recognition.
@@ -523,11 +604,102 @@ SENSOR_PRESETS = {
     "Micro Four Thirds (17.3x13)": (17.3, 13.0),
     "1-inch (13.2x8.8)": (13.2, 8.8),
     "custom": None,
+    "35mm equivalent (EXIF / unknown sensor)": None,
 }
 
 
+def _focal_length_calculation(
+    focal_length_mm: float,
+    sensor: str,
+    sensor_width_mm: float,
+    image_side_px: float,
+    image: torch.Tensor | None = None,
+) -> tuple[float, dict]:
+    if not math.isfinite(focal_length_mm) or focal_length_mm < 0:
+        raise ValueError("focal_length_mm must be a finite non-negative number.")
+    if sensor not in SENSOR_PRESETS:
+        raise ValueError(f"Unknown sensor mode {sensor!r}.")
+    if image is not None:
+        _validate_image_batch(image, "DepthPro2 Focal Length image")
+
+    height = int(image.shape[1]) if image is not None else None
+    width = int(image.shape[2]) if image is not None else None
+    if focal_length_mm == 0:
+        side = max(height, width) if image is not None else (
+            image_side_px if math.isfinite(image_side_px) and image_side_px > 0 else None
+        )
+        return 0.0, {"height": height, "width": width, "side": side, "sensor": sensor}
+
+    if sensor == "35mm equivalent (EXIF / unknown sensor)":
+        if image is None:
+            raise ValueError(
+                "35mm-equivalent mode needs an IMAGE input so its diagonal can be measured; "
+                "connect the image used for depth, or choose a physical sensor mode."
+            )
+        return _focal_mm_to_px(focal_length_mm, height, width), {
+            "height": height,
+            "width": width,
+            "side": max(height, width),
+            "sensor": sensor,
+        }
+
+    preset = SENSOR_PRESETS[sensor]
+    sensor_w = preset[0] if preset is not None else sensor_width_mm
+    if sensor_w is None or not math.isfinite(sensor_w) or sensor_w <= 0:
+        raise ValueError(
+            f"sensor '{sensor}' has no known size: set a positive sensor_width_mm "
+            "(the 'custom' sensor needs its active readout width in mm)."
+        )
+    if image is not None:
+        # The sensor-width direction follows the image's long edge, including portrait images.
+        side = max(height, width)
+    else:
+        side = image_side_px
+        if not math.isfinite(side) or side <= 0:
+            raise ValueError(
+                "image_side_px must be a positive pixel count when no IMAGE is connected."
+            )
+    return focal_length_mm * side / sensor_w, {
+        "height": height,
+        "width": width,
+        "side": side,
+        "sensor": sensor,
+        "sensor_width_mm": sensor_w,
+    }
+
+
+def _focal_length_readout(focal_length_px: float, info: dict) -> str:
+    lines = [f"Focal length: {focal_length_px:.2f} px"]
+    height, width = info["height"], info["width"]
+    if height is not None:
+        orientation = "square" if height == width else ("landscape" if width > height else "portrait")
+        lines.append(f"Image: {width} × {height} ({orientation})")
+    elif info["side"] is not None:
+        lines.append(f"Image side: {info['side']:.0f} px (manual)")
+    if focal_length_px == 0:
+        lines.append("0 requests automatic focal estimation in DepthPro2 Estimate/Video.")
+        return "\n".join(lines)
+
+    equivalent_mode = info["sensor"] == "35mm equivalent (EXIF / unknown sensor)"
+    lines.append("Mode: 35mm equivalent / EXIF" if equivalent_mode else "Mode: physical lens + sensor")
+    sensor_w = info.get("sensor_width_mm")
+    if sensor_w is not None:
+        lines.append(f"Active sensor width: {sensor_w:.2f} mm")
+    if width is not None:
+        diagonal = math.hypot(width, height)
+        equivalent_mm = focal_length_px * math.hypot(36.0, 24.0) / diagonal
+        horizontal_fov = math.degrees(2.0 * math.atan(width / (2.0 * focal_length_px)))
+        vertical_fov = math.degrees(2.0 * math.atan(height / (2.0 * focal_length_px)))
+        lines.append(f"35mm equivalent: {equivalent_mm:.2f} mm")
+        lines.append(f"FOV: {horizontal_fov:.2f}° × {vertical_fov:.2f}° (H × V)")
+    elif info["side"] is not None:
+        fov = math.degrees(2.0 * math.atan(info["side"] / (2.0 * focal_length_px)))
+        lines.append(f"FOV along sensor width: {fov:.2f}°")
+    return "\n".join(lines)
+
+
 class DepthPro2FocalLength(io.ComfyNode):
-    """A lens focal length (mm) to pixels for a known sensor size."""
+    """Convert physical or 35mm-equivalent lens focal length to image pixels."""
 
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -535,52 +707,88 @@ class DepthPro2FocalLength(io.ComfyNode):
             node_id="DepthPro2FocalLength",
             display_name="DepthPro2 Focal Length",
             category=CATEGORY,
-            search_aliases=["focal length", "focal", "lens", "sensor", "35mm equivalent"],
+            is_output_node=True,
+            search_aliases=["focal length", "focal", "lens", "sensor", "35mm equivalent", "EXIF"],
             description=(
-                "Convert a physical lens focal length (mm, as engraved on the lens) to pixels for a "
-                "known sensor size, for cine/mirrorless cameras (ARRI, Blackmagic, Sony...). Enter the "
-                "image pixels along the sensor's full width — the width for landscape images, the "
-                "height for portrait images. Pick a sensor preset or 'custom' with sensor_width_mm; "
-                "the conversion assumes that side spans the full sensor width (for cropped readouts, "
-                "enter the width of the sensor area actually used). Link the output to the "
-                "focal_length_px input of the Estimate/Video nodes. For phone photos and unknown "
-                "cameras, use the focal_length_mm (35mm-equivalent) widget instead."
+                "Convert a lens focal length (mm) to pixels and link focal_length_px to "
+                "DepthPro2 Estimate/Video. Basic: connect the exact IMAGE, choose a physical sensor "
+                "or '35mm equivalent (EXIF / unknown sensor)', then enter the focal length. Physical "
+                "mode reads the image's long side automatically, so portrait images need no manual "
+                "math. Professional: choose 'custom' and enter the active sensor/readout width for "
+                "cropped or anamorphic cameras; disconnect IMAGE to use image_side_px manually. "
+                "0 requests automatic estimation downstream. The node reports pixels, 35mm-equivalent "
+                "focal length and field of view after execution."
             ),
             inputs=[
-                io.Float.Input("focal_length_mm", default=35.0, min=0.0, step=0.5,
-                               tooltip="Focal length in mm, as engraved on the lens (or the 35mm-equivalent); "
-                                       "0 passes 0 through."),
-                io.Combo.Input("sensor", options=list(SENSOR_PRESETS), default=next(iter(SENSOR_PRESETS)),
-                               tooltip="The camera sensor (its width is what matters); 'custom' uses "
-                                       "sensor_width_mm."),
-                io.Float.Input("sensor_width_mm", default=36.0, min=0.1, max=100.0, step=0.01, advanced=True,
-                               tooltip="Sensor width in mm, required for the 'custom' sensor."),
-                io.Float.Input("image_side_px", default=1920.0, min=1.0, max=16384.0, step=1.0, advanced=True,
-                               tooltip="Image pixels along the sensor's full width: the width for landscape "
-                                       "images, the height for portrait images (for cropped readouts, the "
-                                       "width of the sensor area actually used)."),
+                io.Float.Input("focal_length_mm", display_name="Focal length (mm)",
+                               default=35.0, min=0.0, step=0.5,
+                               tooltip="Physical mm engraved on the lens, or the 35mm-equivalent EXIF value "
+                                       "when that sensor mode is selected; 0 estimates downstream."),
+                io.Combo.Input("sensor", display_name="Mode / sensor", options=list(SENSOR_PRESETS),
+                               default=next(iter(SENSOR_PRESETS)),
+                               tooltip="Physical camera sensor, 'custom' active readout width, or 35mm-equivalent "
+                                       "EXIF / unknown sensor (requires IMAGE)."),
+                io.Float.Input("sensor_width_mm", display_name="Active sensor width (mm)",
+                               default=36.0, min=0.1, max=100.0, step=0.01, advanced=True,
+                               tooltip="Used only by 'custom': width in mm of the sensor area actually read out, "
+                                       "not the full sensor when cropped."),
+                io.Float.Input("image_side_px", display_name="Manual image side (px)",
+                               default=1920.0, min=1.0, max=16384.0, step=1.0, advanced=True,
+                               tooltip="Fallback when IMAGE is not connected: pixels along the sensor-width "
+                                       "direction (width for landscape, height for portrait). Ignored with IMAGE."),
+                io.Image.Input("image", display_name="Image (auto size)", optional=True,
+                               tooltip="Connect the exact image used for depth. Its dimensions and orientation "
+                                       "are read automatically; image_side_px is ignored."),
             ],
             outputs=[
                 io.Float.Output(id="focal_length_px", display_name="focal_length_px",
-                                tooltip="Focal length in pixels of the image."),
+                                tooltip="Focal length in pixels of the image; 0 requests automatic estimation."),
             ],
         )
 
     @classmethod
+    def validate_inputs(cls, focal_length_mm: float, sensor: str, sensor_width_mm: float,
+                        image_side_px: float, image: torch.Tensor | None = None) -> bool | str:
+        if not math.isfinite(focal_length_mm) or focal_length_mm < 0:
+            return "focal_length_mm must be a finite non-negative number."
+        if sensor not in SENSOR_PRESETS:
+            return f"Unknown sensor mode {sensor!r}."
+        # Frontend validation runs before linked IMAGE tensors are supplied; execute checks the link.
+        if sensor == "35mm equivalent (EXIF / unknown sensor)" and image is None:
+            return True
+        try:
+            _focal_length_calculation(focal_length_mm, sensor, sensor_width_mm, image_side_px, image)
+        except ValueError as error:
+            return str(error)
+        return True
+
+    @classmethod
     def execute(cls, focal_length_mm: float, sensor: str, sensor_width_mm: float,
-                image_side_px: float) -> io.NodeOutput:
-        if image_side_px <= 0:
-            raise ValueError("image_side_px must be a positive pixel count.")
-        preset = SENSOR_PRESETS[sensor]
-        sensor_w = preset[0] if preset is not None else sensor_width_mm
-        if sensor_w is None or sensor_w <= 0:
-            raise ValueError(
-                f"sensor '{sensor}' has no known size: set a positive sensor_width_mm "
-                "(the 'custom' sensor needs its width in mm)."
-            )
-        if focal_length_mm <= 0:
-            return io.NodeOutput(0.0)
-        return io.NodeOutput(focal_length_mm * image_side_px / sensor_w)
+                image_side_px: float, image: torch.Tensor | None = None) -> io.NodeOutput:
+        focal_px, info = _focal_length_calculation(
+            focal_length_mm, sensor, sensor_width_mm, image_side_px, image
+        )
+        return io.NodeOutput(focal_px, ui=ui.PreviewText(_focal_length_readout(focal_px, info)))
+
+
+def _validate_image_batch(images: torch.Tensor, label: str) -> None:
+    if not isinstance(images, torch.Tensor) or images.ndim != 4 or images.shape[-1] != 3:
+        shape = tuple(images.shape) if isinstance(images, torch.Tensor) else type(images).__name__
+        raise ValueError(f"{label} must be a ComfyUI IMAGE tensor shaped (B, H, W, 3); got {shape}.")
+    if images.shape[0] == 0:
+        raise ValueError(f"{label} must contain at least one image.")
+    if images.shape[1] == 0 or images.shape[2] == 0:
+        raise ValueError(f"{label} must have non-empty spatial dimensions.")
+
+
+def _validate_depth(depth: torch.Tensor, label: str) -> None:
+    if not isinstance(depth, torch.Tensor) or depth.ndim != 3:
+        shape = tuple(depth.shape) if isinstance(depth, torch.Tensor) else type(depth).__name__
+        raise ValueError(f"{label} must be a depth tensor shaped (T, H, W); got {shape}.")
+    if depth.shape[0] == 0:
+        raise ValueError(f"{label} must contain at least one depth map.")
+    if depth.shape[1] == 0 or depth.shape[2] == 0:
+        raise ValueError(f"{label} must have non-empty spatial dimensions.")
 
 
 def _prepare_frames(
@@ -632,60 +840,73 @@ def _run_inference(
     Trellis and TripoSplat nodes all do this), so other resident models are evicted in
     time instead of mid-run out-of-memory errors; the input frames stay on the CPU and
     move to the GPU one at a time; and every prediction is moved back to the CPU the
-    moment it is final. If a frame still fails with a CUDA out-of-memory, the processing
-    size halves and retries, so a busy session degrades in detail instead of crashing.
+    moment it is final. If a frame still fails with an accelerator out-of-memory, the
+    processing size halves and retries, so a busy session degrades in detail instead of
+    crashing.
     """
     net, device = model["model"], model["device"]
+    if f_px <= 0 and model.get("focal_pending"):
+        _ensure_focal_model(model)
     height, width = image.shape[1:3]
     side = _resolve_max_size(model, image, max_size, window=window)
     longest = max(height, width)
     attempts = 0
     while True:
-        if device.type != "cpu":
-            mm.load_models_gpu(
-                [model["patcher"]],
-                memory_required=_activation_bytes(model, height, width, side, window=window),
-            )
+        mm.throw_exception_if_processing_interrupted()
         frames, focal, scale = _prepare_frames(image, side, f_px)
         progress = ProgressBar(len(frames))
         bar = tqdm(total=len(frames), desc=desc)
         try:
+            if device.type != "cpu":
+                mm.load_models_gpu(
+                    [model["patcher"]],
+                    memory_required=_activation_bytes(model, height, width, side, window=window),
+                )
             predictions = []
             if mode is None:
                 for frame in frames:
+                    mm.throw_exception_if_processing_interrupted()
                     prediction = net.infer(to_normalized_tensor(frame, device), f_px=focal)
                     _to_cpu(prediction)
                     predictions.append(prediction)
                     progress.update(1)
                     bar.update(1)
             else:
-                for prediction in net.infer_video(
+                iterator = iter(net.infer_video(
                     (to_normalized_tensor(frame, device) for frame in frames),
                     window=window, overlap=overlap, f_px=focal, mode=mode,
-                ):
+                ))
+                while True:
+                    mm.throw_exception_if_processing_interrupted()
+                    try:
+                        prediction = next(iterator)
+                    except StopIteration:
+                        break
                     _to_cpu(prediction)
                     predictions.append(prediction)
                     progress.update(1)
                     bar.update(1)
-            bar.close()
             return predictions, scale
-        except torch.cuda.OutOfMemoryError:
-            bar.close()
+        except Exception as error:
+            if not mm.is_oom(error):
+                raise
             del frames
             mm.soft_empty_cache()
             attempts += 1
-            if attempts >= 3:
+            current = min(longest, side) if side > 0 else longest
+            if attempts >= 3 or current <= 32:
                 raise RuntimeError(
-                    "DepthPro2: out of GPU memory even at the smallest processing "
-                    "size. Free VRAM (other loaded models), choose a smaller preset, "
-                    "use the fp8 precision, or set a smaller max_size."
+                    "DepthPro2: out of memory even at the smallest processing size. "
+                    "Free memory used by other models, choose a smaller preset, use "
+                    "the fp8 precision, or set a smaller max_size."
                 ) from None
-            current = side if side > 0 else longest
-            side = max(256, current // (2**attempts))
+            side = max(32, current // (2**attempts))
             LOGGER.warning(
                 "DepthPro2: out of memory at longest side %d; retrying at %d.",
                 current, side,
             )
+        finally:
+            bar.close()
 
 
 def _normalize_inverse_depth(inverse_depth: torch.Tensor) -> torch.Tensor:
@@ -705,6 +926,8 @@ def _normalize_inverse_depth(inverse_depth: torch.Tensor) -> torch.Tensor:
 def _depth_outputs(
     predictions: list[dict], original_size: tuple[int, int], scale: float
 ) -> tuple[torch.Tensor, torch.Tensor, float, torch.Tensor]:
+    if not predictions:
+        raise ValueError("DepthPro2: inference produced no predictions.")
     inverse = torch.stack([p["inverse_depth"].float().cpu() for p in predictions])
     depth = torch.stack(
         [
@@ -716,7 +939,14 @@ def _depth_outputs(
     )
     if inverse.shape[-2:] != original_size:
         inverse = F.interpolate(inverse[:, None], size=original_size, mode="bilinear")[:, 0]
-        depth = F.interpolate(depth[:, None], size=original_size, mode="bilinear")[:, 0]
+        valid = torch.isfinite(depth)
+        weights = F.interpolate(valid.float()[:, None], size=original_size, mode="bilinear")[:, 0]
+        depth = F.interpolate(
+            torch.where(valid, depth, 0.0)[:, None], size=original_size, mode="bilinear"
+        )[:, 0]
+        depth = torch.where(
+            weights > 0, depth / weights.clamp_min(1e-12), torch.full_like(depth, float("inf"))
+        )
     image = _normalize_inverse_depth(inverse).unsqueeze(-1).repeat(1, 1, 1, 3)
     focal = 0.0
     if predictions[0]["focallength_px"] is not None:
@@ -738,12 +968,12 @@ class DepthPro2Loader(io.ComfyNode):
             description=(
                 "Load Apple Depth Pro 2. Preset names download weights from Hugging Face into "
                 "models/depthpro2 on first use; local .safetensors/.pt files in that folder are also "
-                "listed. auto uses ComfyUI's session dtype for auxiliary models (fp16 on CUDA; honors "
-                "--fp16-text-enc/--bf16-text-enc), fp16 is the native default and bf16 Apple's training "
-                "precision; fp8 stores encoder weights as "
-                "float8 with per-channel scales (about half the memory of bf16). The model is managed "
-                "by ComfyUI's model management: it rides in RAM and is evicted from the GPU when other "
-                "nodes need the VRAM."
+                "listed. auto uses ComfyUI's session dtype for auxiliary models (usually fp16 on an "
+                "accelerator, fp32 on CPU; honors --fp16-text-enc/--bf16-text-enc); fp16 is the native "
+                "default and bf16 Apple's training precision; fp8 stores encoder weights as float8 "
+                "with per-channel scales and dequantizes them on every forward (about half the bf16 "
+                "weight storage, not an fp8 compute kernel). The model is managed by ComfyUI's model "
+                "management: it rides in RAM and is evicted from the GPU when other nodes need it."
             ),
             search_aliases=["depthpro2", "depth pro 2", "apple depth", "metric depth", "depth estimation"],
             inputs=[
@@ -753,12 +983,12 @@ class DepthPro2Loader(io.ComfyNode):
                                        "a local .safetensors/.pt file in that folder."),
                 io.Combo.Input("precision", options=["auto", "bf16", "fp16", "fp32", "fp8"], default="auto",
                                tooltip="auto uses ComfyUI's session dtype; fp8 stores encoder weights as "
-                                       "float8 (about half the memory of bf16)."),
+                                       "float8 and dequantizes them on every forward."),
                 io.Combo.Input(
                     "device", options=["auto", "cuda", "mps", "cpu"], default="auto",
-                    tooltip="auto uses ComfyUI's device policy for auxiliary models (honors --gpu-only, "
-                            "falls back to the CPU on machines without usable VRAM); an explicit device "
-                            "is used as-is.",
+                    tooltip="auto uses ComfyUI's device policy for auxiliary models (honors --gpu-only; "
+                            "keeps DepthPro2 on MPS in Apple Silicon shared-memory sessions; falls back "
+                            "to CPU without a usable accelerator); an explicit device is used as-is.",
                 ),
             ],
             outputs=[DEPTHPRO2_MODEL.Output(id="model", display_name="model")],
@@ -781,20 +1011,20 @@ class DepthPro2Estimate(io.ComfyNode):
             description=(
                 "Estimate metric depth for each image of the batch independently. depth_image is "
                 "normalized inverse depth (near white, far black) for preview/ControlNet; depth_meters "
-                "is raw metric depth (T, H, W) with inf at sky; sky is a MASK (1 at sky) for comp "
+                "is raw metric depth (T, H, W) with inf at sky; sky_mask is a MASK (1 at sky) for comp "
                 "holdouts. focal_length_mm is the lens focal length "
                 "as a 35mm-equivalent (e.g. 24, 35, 50 — the EXIF FocalLengthIn35mmFilm value); 0 "
                 "estimates it with the focal-length model, as long as the 'Estimate focal length' "
                 "toggle (on by default) is on — with it off, an explicit focal length is required "
                 "(focal_length_mm or a linked focal_length_px) and a ValueError is raised without one. "
                 "Depth in meters scales linearly with focal "
-                "length. max_size: 0 (default) picks the largest resolution that fits the free VRAM "
-                "automatically, -1 runs at native resolution (sharpest edges, may OOM on very large "
-                "images), any positive value caps the longest side processed; the output is always "
-                "upsampled back to the input size. The estimated processing memory is reserved through "
-                "ComfyUI's model management before the run, so other loaded models are evicted when "
-                "needed; if a frame still runs out of memory, the node retries at half the processing "
-                "size instead of crashing. For physical mm with a known "
+                "length. max_size: 0 (default) chooses a budget-aware processing resolution, -1 runs "
+                "at native resolution (sharpest edges, may OOM on very large images), and any positive "
+                "value caps the longest side processed; the output is always upsampled back to the "
+                "input size. CUDA reserves estimated processing memory through ComfyUI's model "
+                "management before the run; Apple Silicon budgets against Metal working-set headroom. "
+                "If a frame still runs out of memory, the node retries at half the processing size, "
+                "down to a 32 px longest side. For physical mm with a known "
                 "camera sensor, link the Focal Length node's focal_length_px output to the optional "
                 "focal_length_px input; it overrides focal_length_mm."
             ),
@@ -807,15 +1037,15 @@ class DepthPro2Estimate(io.ComfyNode):
                                          "(focal_length_mm is 0 and focal_length_px is not linked). Off: an "
                                          "explicit focal length is required (focal_length_mm or a linked "
                                          "focal_length_px) and a ValueError is raised without one."),
-                io.Float.Input("focal_length_mm", default=0.0, min=0.0, step=0.5,
+                io.Float.Input("focal_length_mm", default=0.0, min=0.0, step=0.5, optional=True,
                                tooltip="Lens focal length as a 35mm-equivalent (e.g. 24, 35, 50); 0 estimates "
                                        "it with the focal-length model (while 'Estimate focal length' is on)."),
                 io.Float.Input("focal_length_px", default=0.0, min=0.0, step=0.1, optional=True,
                                tooltip="Focal length in pixels of the image, e.g. from the Focal Length node; "
                                        "overrides focal_length_mm."),
-                io.Int.Input("max_size", default=0, min=-1, max=16384, step=32,
-                             tooltip="0 (default) picks the largest resolution that fits the free VRAM; -1 "
-                                     "runs at native resolution (may OOM on very large images); any positive "
+                io.Int.Input("max_size", default=0, min=-1, max=16384, step=32, optional=True,
+                             tooltip="0 (default) chooses a budget-aware processing resolution; -1 runs "
+                                     "at native resolution (may OOM on very large images); any positive "
                                      "value caps the longest side processed. The output is always upsampled "
                                      "back to the input size."),
             ],
@@ -835,7 +1065,8 @@ class DepthPro2Estimate(io.ComfyNode):
     def execute(cls, model: dict, image: torch.Tensor, estimate_focal_length: bool,
                 focal_length_mm: float, focal_length_px: float | None = None,
                 max_size: int = 0) -> io.NodeOutput:
-        f_px = focal_length_px or _focal_mm_to_px(focal_length_mm, *image.shape[1:3])
+        _validate_image_batch(image, "DepthPro2 estimate image")
+        f_px = _resolve_focal_px(focal_length_mm, *image.shape[1:3], focal_length_px)
         if f_px <= 0 and not estimate_focal_length:
             raise ValueError(
                 "DepthPro2 estimate: no focal length is set (focal_length_mm is 0 and "
@@ -866,13 +1097,13 @@ class DepthPro2Video(io.ComfyNode):
                 "memory. depth_image is normalized over the whole batch so brightness is steady "
                 "across frames. buffered lets each frame also see later frames (overlap applies); "
                 "unbuffered predicts each frame from itself and the frames before it, at lower latency "
-                "and memory (overlap is ignored). max_size: 0 (default) picks the largest resolution "
-                "that fits the free VRAM automatically (accounting for the window), -1 runs at native "
-                "resolution, any positive value caps the longest side processed; the output is always "
-                "upsampled back to the input size. Frames are staged on the CPU and moved to the GPU "
-                "one window at a time, and the estimated processing memory is reserved through "
-                "ComfyUI's model management before the run, so other loaded models are evicted when "
-                "needed. Link the Focal Length node's focal_length_px output "
+                "and memory (overlap is ignored). max_size: 0 (default) chooses a budget-aware "
+                "processing resolution accounting for the window, -1 runs at native resolution, and "
+                "any positive value caps the longest side processed; the output is always upsampled "
+                "back to the input size. Frames are staged on the CPU and moved to the GPU one window "
+                "at a time. CUDA reserves estimated processing memory through ComfyUI's model "
+                "management before the run; Apple Silicon budgets against Metal working-set headroom. "
+                "Link the Focal Length node's focal_length_px output "
                 "to the optional focal_length_px input to override focal_length_mm with a sensor-aware "
                 "physical focal length."
             ),
@@ -890,16 +1121,16 @@ class DepthPro2Video(io.ComfyNode):
                                          "not linked). Off: an explicit focal length is required "
                                          "(focal_length_mm or a linked focal_length_px) and a ValueError "
                                          "is raised without one."),
-                io.Float.Input("focal_length_mm", default=0.0, min=0.0, step=0.5,
+                io.Float.Input("focal_length_mm", default=0.0, min=0.0, step=0.5, optional=True,
                                tooltip="35mm-equivalent focal length; 0 estimates it from the first window "
                                        "(while 'Estimate focal length' is on)."),
                 io.Float.Input("focal_length_px", default=0.0, min=0.0, step=0.1, optional=True,
                                tooltip="Focal length in pixels, e.g. from the Focal Length node; overrides "
                                        "focal_length_mm."),
-                io.Int.Input("max_size", default=0, min=-1, max=16384, step=32,
-                             tooltip="0 (default) picks the largest resolution that fits the free VRAM "
-                                     "(accounting for the window); -1 native; positive caps the longest "
-                                     "side. Output is upsampled back to the input size."),
+                io.Int.Input("max_size", default=0, min=-1, max=16384, step=32, optional=True,
+                             tooltip="0 (default) chooses a budget-aware processing resolution accounting "
+                                     "for the window; -1 native; positive caps the longest side. Output is "
+                                     "upsampled back to the input size."),
                 io.Combo.Input("mode", options=["buffered", "unbuffered"], default="buffered", advanced=True,
                                tooltip="buffered lets each frame also see later frames; unbuffered predicts "
                                        "from the past only, at lower latency and memory."),
@@ -921,9 +1152,10 @@ class DepthPro2Video(io.ComfyNode):
                 estimate_focal_length: bool, focal_length_mm: float,
                 focal_length_px: float | None = None, max_size: int = 0,
                 mode: str = "buffered") -> io.NodeOutput:
+        _validate_image_batch(images, "DepthPro2 video images")
         if mode == "buffered" and overlap >= window:
             raise ValueError("overlap must be smaller than window.")
-        f_px = focal_length_px or _focal_mm_to_px(focal_length_mm, *images.shape[1:3])
+        f_px = _resolve_focal_px(focal_length_mm, *images.shape[1:3], focal_length_px)
         if f_px <= 0 and not estimate_focal_length:
             raise ValueError(
                 "DepthPro2 video: no focal length is set (focal_length_mm is 0 and "
@@ -976,6 +1208,7 @@ class DepthPro2Colorize(io.ComfyNode):
 
     @classmethod
     def execute(cls, depth: torch.Tensor, colormap: str) -> io.NodeOutput:
+        _validate_depth(depth, "DepthPro2 colorize depth")
         inverse = inverse_metric(depth)
         return io.NodeOutput(colorize(inverse, colormap, color_scale(inverse)))
 
@@ -1019,6 +1252,7 @@ class DepthPro2PositionPass(io.ComfyNode):
     @classmethod
     def execute(cls, depth: torch.Tensor, focal_length_px: float, max_depth: float,
                 cx_offset: float, cy_offset: float) -> io.NodeOutput:
+        _validate_depth(depth, "DepthPro2 position depth")
         if focal_length_px <= 0:
             raise ValueError("focal_length_px must be positive; link it from the estimate node.")
         height, width = depth.shape[-2:]
@@ -1031,6 +1265,33 @@ class DepthPro2PositionPass(io.ComfyNode):
         x = z * u.view(1, 1, width) / focal_length_px
         y = z * v.view(1, height, 1) / focal_length_px
         return io.NodeOutput(torch.stack([x, y, z], dim=-1), valid.to(torch.float32))
+
+
+def _reserve_output_paths(
+    folder: str, filename: str, extension: str, counter: int, count: int
+) -> list[Path]:
+    """Reserve unique output names, including across concurrent prompts."""
+    directory = Path(folder)
+    flags = re.IGNORECASE if os.name == "nt" else 0
+    pattern = re.compile(rf"{re.escape(filename)}_(\d+){re.escape(extension)}", flags)
+    indices = [
+        int(match.group(1))
+        for path in directory.iterdir()
+        if (match := pattern.fullmatch(path.name))
+    ]
+    counter = max(counter, max(indices, default=0) + 1)
+    paths = []
+    while len(paths) < count:
+        path = directory / f"{filename}_{counter:05d}{extension}"
+        try:
+            with path.open("xb"):
+                pass
+        except FileExistsError:
+            counter += 1
+            continue
+        paths.append(path)
+        counter += 1
+    return paths
 
 
 class DepthPro2Save16(io.ComfyNode):
@@ -1059,6 +1320,7 @@ class DepthPro2Save16(io.ComfyNode):
 
     @classmethod
     def execute(cls, depth: torch.Tensor, filename_prefix: str) -> io.NodeOutput:
+        _validate_depth(depth, "DepthPro2 16-bit depth")
         from PIL import Image
         from PIL.PngImagePlugin import PngInfo
 
@@ -1070,15 +1332,14 @@ class DepthPro2Save16(io.ComfyNode):
             filename_prefix, folder_paths.get_output_directory(), width, height
         )
         normalized_frames = []
-        for frame in inverse:
+        paths = _reserve_output_paths(folder, filename, ".png", counter, len(inverse))
+        for frame, path in zip(inverse, paths):
             normalized = (frame / scale).clamp(0, 1)
             values = normalized.mul(65535).round().to(torch.uint16).numpy()
             meta = PngInfo()
             meta.add_text("depthpro2_k", f"{k:.6g}")
-            path = Path(folder) / f"{filename}_{counter:05d}.png"
             Image.fromarray(values).save(path, pnginfo=meta, compress_level=1)
             normalized_frames.append(normalized)
-            counter += 1
         LOGGER.info("DepthPro2 16-bit: depth in meters = %.2f / value, 0 is infinitely far.", k)
         preview = torch.stack(normalized_frames).unsqueeze(-1).repeat(1, 1, 1, 3)
         return io.NodeOutput(ui=ui.PreviewImage(preview, cls=cls))
@@ -1127,6 +1388,7 @@ class DepthPro2SaveFloat(io.ComfyNode):
         sky_value: float,
         focal_length_px: float | None = None,
     ) -> io.NodeOutput:
+        _validate_depth(depth, "DepthPro2 float depth")
         from PIL import Image
 
         meters = depth.float().cpu().clone()
@@ -1139,11 +1401,9 @@ class DepthPro2SaveFloat(io.ComfyNode):
         focal = float(focal_length_px) if focal_length_px else 0.0
         height, width = meters.shape[-2:]
         ext = ".exr" if format == "exr" else ".tif"
-        folder, filename, _, subfolder, _ = folder_paths.get_save_image_path(
+        folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
             filename_prefix, folder_paths.get_output_directory(), width, height
         )
-        # get_save_image_path counts PNGs only; count our own format to avoid overwrites.
-        counter = len(list(Path(folder).glob(f"{filename}_*{ext}")))
         if format == "exr":
             try:
                 import Imath
@@ -1156,8 +1416,8 @@ class DepthPro2SaveFloat(io.ComfyNode):
         inverse = inverse_metric(depth)
         scale = color_scale(inverse)
         preview_frames = []
-        for i, frame in enumerate(meters):
-            path = Path(folder) / f"{filename}_{counter:05d}{ext}"
+        paths = _reserve_output_paths(folder, filename, ext, counter, len(meters))
+        for i, (frame, path) in enumerate(zip(meters, paths)):
             if format == "exr":
                 header = OpenEXR.Header(width, height)
                 header["channels"] = {"Z": Imath.Channel(Imath.PixelType(Imath.PixelType.FLOAT))}
@@ -1178,7 +1438,6 @@ class DepthPro2SaveFloat(io.ComfyNode):
                     info[65002] = f"{focal:.6g}"
                 Image.fromarray(frame.numpy()).save(path, tiffinfo=info)
             preview_frames.append((inverse[i] / scale).clamp(0, 1))
-            counter += 1
         LOGGER.info("DepthPro2 float depth: %s, meters, sky = %s.", path, sky_desc)
         preview = torch.stack(preview_frames).unsqueeze(-1).repeat(1, 1, 1, 3)
         return io.NodeOutput(ui=ui.PreviewImage(preview, cls=cls))
@@ -1222,22 +1481,31 @@ class DepthPro2SavePLY(io.ComfyNode):
     ) -> io.NodeOutput:
         import numpy as np
 
-        if position.ndim != 4 or position.shape[-1] != 3:
+        if not isinstance(position, torch.Tensor) or position.ndim != 4 or position.shape[-1] != 3:
             raise ValueError("position must be the Position Pass position_xyz output (T, H, W, 3).")
-        if image is not None and image.shape[1:3] != position.shape[1:3]:
-            raise ValueError("image resolution must match the position pass resolution.")
+        if any(size == 0 for size in position.shape):
+            raise ValueError("position must contain at least one non-empty point map.")
+        if not isinstance(valid, torch.Tensor) or valid.shape != position.shape[:3]:
+            raise ValueError("valid must be a MASK shaped (T, H, W) matching position.")
+        if image is not None and (
+            not isinstance(image, torch.Tensor)
+            or image.ndim != 4
+            or image.shape[-1] != 3
+            or image.shape != position.shape
+        ):
+            raise ValueError("image must match position in batch, spatial dimensions and RGB channels.")
         height, width = position.shape[1:3]
-        folder, filename, _, _, _ = folder_paths.get_save_image_path(
+        folder, filename, counter, _, _ = folder_paths.get_save_image_path(
             filename_prefix, folder_paths.get_output_directory(), width, height
         )
-        counter = len(list(Path(folder).glob(f"{filename}_*.ply")))
+        paths = _reserve_output_paths(folder, filename, ".ply", counter, position.shape[0])
         colored = image is not None
         props = "property float x\nproperty float y\nproperty float z\n"
         fields = [("x", "<f4"), ("y", "<f4"), ("z", "<f4")]
         if colored:
             props += "property uchar red\nproperty uchar green\nproperty uchar blue\n"
             fields += [("red", "u1"), ("green", "u1"), ("blue", "u1")]
-        for i in range(position.shape[0]):
+        for i, path in enumerate(paths):
             mask = valid[i].bool()
             points = position[i][mask].numpy().astype("<f4")
             record = np.empty(len(points), dtype=np.dtype(fields))
@@ -1249,8 +1517,6 @@ class DepthPro2SavePLY(io.ComfyNode):
                 f"ply\nformat binary_little_endian 1.0\nelement vertex {len(points)}\n"
                 f"{props}end_header\n"
             )
-            path = Path(folder) / f"{filename}_{counter:05d}.ply"
             path.write_bytes(header.encode("ascii") + record.tobytes())
             LOGGER.info("DepthPro2 PLY: %s (%d points, meters).", path, len(points))
-            counter += 1
         return io.NodeOutput()

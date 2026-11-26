@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-depthpro2"
 description = "Apple Depth Pro 2 metric monocular depth nodes: custom loader with bf16/fp16/fp8 weights, per-image and temporally consistent video depth."
-version = "1.0.1"
+version = "1.1.0"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
 dependencies = ["timm>=1.0.27,<1.1", "huggingface_hub>=1.0", "safetensors"]

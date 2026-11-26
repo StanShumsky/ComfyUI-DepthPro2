@@ -247,6 +247,11 @@ class DepthPro2(nn.Module, PyTorchModelHubMixin):
         self.head = create_inverse_depth_head(self.decoder.dim_out)
         self.fov = FOVEstimator(precision) if fov else None
         self.precision = precision
+        self._focal_loader: Callable[[], None] | None = None
+
+    def _ensure_focal(self) -> None:
+        if self._focal_loader is not None:
+            self._focal_loader()
 
     @property
     def weight_device(self) -> torch.device:
@@ -325,6 +330,8 @@ class DepthPro2(nn.Module, PyTorchModelHubMixin):
                 "infer takes a float (3, H, W) or (T, 3, H, W) tensor from transform(image), "
                 f"got {x.dtype} {tuple(x.shape)}."
             )
+        if f_px is None:
+            self._ensure_focal()
         if x.device != self.weight_device:
             x = x.to(self.weight_device, non_blocking=True)
         is_image = x.ndim == 3
@@ -369,6 +376,8 @@ class DepthPro2(nn.Module, PyTorchModelHubMixin):
             A :class:`~depth_pro_2.streaming.DepthStream`, whose ``step`` and ``flush`` return
             lists of the predictions finished, as :meth:`infer_video` yields them.
         """
+        if f_px is None:
+            self._ensure_focal()
         return DepthStream(self, window, overlap, f_px, mode=mode)
 
     @torch.no_grad()
@@ -397,6 +406,8 @@ class DepthPro2(nn.Module, PyTorchModelHubMixin):
         Yields:
             ``inverse_depth`` and ``depth`` in meters, both ``(H, W)``, and ``focallength_px``.
         """
+        if f_px is None:
+            self._ensure_focal()
         device = self.weight_device
 
         def _on_device(frames):

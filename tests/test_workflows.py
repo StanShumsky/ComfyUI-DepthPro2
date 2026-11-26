@@ -10,19 +10,22 @@ from tests.test_nodes import _entry_node_list
 
 ROOT = Path(__file__).resolve().parents[1]
 
-
 def _widget_inputs(schema):
-    """The inputs rendered as widgets (value types, not link sockets), in schema order,
-    as the frontend serializes them into widgets_values."""
+    """The inputs rendered as widgets (value types, not link sockets), in the order the frontend
+    serializes them into widgets_values: non-optional widgets first (schema order), then optional
+    widgets (schema order) — ComfyUI sorts inputs by optional (required then optional; see
+    comfy_api.latest's required/optional partitioning and the frontend's getOrderedInputSpecs)."""
     from comfy_api.latest import io
 
     widget_types = (io.Float.Input, io.Int.Input, io.Combo.Input, io.String.Input, io.Boolean.Input)
-    return [
+    widgets = [
         inp
         for inp in schema.inputs
         if type(inp) in widget_types and (not inp.optional or inp.default is not None)
     ]
-
+    non_optional = [i for i in widgets if not i.optional]
+    optional = [i for i in widgets if i.optional]
+    return non_optional + optional
 
 @pytest.mark.parametrize("workflow", ["i2depth", "v2depth"])
 def test_example_workflow(workflow):

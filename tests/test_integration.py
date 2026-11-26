@@ -22,13 +22,15 @@ pytestmark = [
 
 @pytest.fixture(scope="module")
 def wrapper(nodes):
-    (wrapper,) = nodes.DepthPro2Loader.execute("depthpro2-s", "bf16", "auto").result
+    (wrapper,) = nodes.DepthPro2Loader.execute("depthpro2-s", "bf16", "cpu").result
     return wrapper
 
 
 def test_estimate(nodes, wrapper, make_batch):
     batch = make_batch(t=2)
-    image, depth, focal, sky = nodes.DepthPro2Estimate.execute(wrapper, batch, 0.0, 0).result
+    image, depth, focal, sky = nodes.DepthPro2Estimate.execute(
+        wrapper, batch, estimate_focal_length=True, focal_length_mm=0.0
+    ).result
     assert image.shape == (2, 256, 384, 3) and depth.shape == (2, 256, 384)
     assert 0 <= image.min() and image.max() <= 1 and focal > 0
     assert torch.isfinite(depth).float().mean() > 0.5
@@ -39,16 +41,21 @@ def test_estimate(nodes, wrapper, make_batch):
 def test_estimate_focal_override_and_resize(nodes, wrapper, make_batch):
     batch = make_batch(t=1)
     expected = 50.0 * math.hypot(384, 256) / math.hypot(36.0, 24.0)
-    _, _, focal, _ = nodes.DepthPro2Estimate.execute(wrapper, batch, 50.0, 192).result
+    _, _, focal, _ = nodes.DepthPro2Estimate.execute(
+        wrapper, batch, estimate_focal_length=False, focal_length_mm=50.0, max_size=192
+    ).result
     assert abs(focal - expected) / expected < 1e-5
 
 
 def test_focal_px_override(nodes, wrapper, make_batch):
     batch = make_batch(t=1)
-    _, _, focal, _ = nodes.DepthPro2Estimate.execute(wrapper, batch, 0.0, 0, focal_length_px=500.0).result
+    _, _, focal, _ = nodes.DepthPro2Estimate.execute(
+        wrapper, batch, estimate_focal_length=True, focal_length_mm=0.0, focal_length_px=500.0
+    ).result
     assert abs(focal - 500.0) < 1e-3
     _, _, focal, _ = nodes.DepthPro2Video.execute(
-        wrapper, batch, 2, 1, 0.0, 0, "buffered", focal_length_px=500.0
+        wrapper, batch, window=2, overlap=1, estimate_focal_length=True,
+        focal_length_mm=0.0, focal_length_px=500.0, mode="buffered",
     ).result
     assert abs(focal - 500.0) < 1e-3
 
@@ -56,17 +63,25 @@ def test_focal_px_override(nodes, wrapper, make_batch):
 def test_video_modes(nodes, wrapper, make_batch):
     batch = make_batch(t=4)
     for mode in ("buffered", "unbuffered"):
-        image, depth, focal, sky = nodes.DepthPro2Video.execute(wrapper, batch, 4, 2, 0.0, 0, mode).result
+        image, depth, focal, sky = nodes.DepthPro2Video.execute(
+            wrapper, batch, window=4, overlap=2, estimate_focal_length=True,
+            focal_length_mm=0.0, mode=mode,
+        ).result
         assert image.shape == (4, 256, 384, 3) and focal > 0
         assert torch.isfinite(depth).float().mean() > 0.5
         assert torch.equal(sky.bool(), ~torch.isfinite(depth))
-    nodes.DepthPro2Video.execute(wrapper, batch[:2], 2, 2, 0.0, 0, "unbuffered")
+    nodes.DepthPro2Video.execute(
+        wrapper, batch[:2], window=2, overlap=2, estimate_focal_length=True,
+        focal_length_mm=0.0, mode="unbuffered",
+    )
 
 
 def test_colorize_matches_upstream_cli(nodes, wrapper, make_batch):
     matplotlib = pytest.importorskip("matplotlib")
     batch = make_batch(t=2)
-    _, depth, _, _ = nodes.DepthPro2Estimate.execute(wrapper, batch, 0.0, 0).result
+    _, depth, _, _ = nodes.DepthPro2Estimate.execute(
+        wrapper, batch, estimate_focal_length=True, focal_length_mm=0.0
+    ).result
     inverse = nodes.inverse_metric(depth)
     scale = float(inverse[0].max()) * 1.2
     lut = (matplotlib.colormaps["turbo"](np.linspace(0, 1, 256))[:, :3] * 255).astype(np.uint8)
@@ -77,7 +92,9 @@ def test_colorize_matches_upstream_cli(nodes, wrapper, make_batch):
 
 def test_position_pass_matches_formula(nodes, wrapper, make_batch):
     batch = make_batch(t=1)
-    _, depth, focal, _ = nodes.DepthPro2Estimate.execute(wrapper, batch, 0.0, 0).result
+    _, depth, focal, _ = nodes.DepthPro2Estimate.execute(
+        wrapper, batch, estimate_focal_length=True, focal_length_mm=0.0
+    ).result
     pos, valid = nodes.DepthPro2PositionPass.execute(depth, focal, 0.0, 0.0, 0.0).result
     finite = torch.isfinite(depth) & (depth > 0)
     assert torch.equal(valid.bool(), finite)
@@ -89,7 +106,9 @@ def test_position_pass_matches_formula(nodes, wrapper, make_batch):
 
 def test_save16_roundtrip(nodes, wrapper, output_dir, make_batch):
     batch = make_batch(t=1)
-    _, depth, _, _ = nodes.DepthPro2Estimate.execute(wrapper, batch, 0.0, 0).result
+    _, depth, _, _ = nodes.DepthPro2Estimate.execute(
+        wrapper, batch, estimate_focal_length=True, focal_length_mm=0.0
+    ).result
     nodes.DepthPro2Save16.execute(depth, "integration/depth16")
     from PIL import Image
 
@@ -105,7 +124,9 @@ def test_save_float_exr_roundtrip(nodes, wrapper, output_dir, make_batch):
     OpenEXR = pytest.importorskip("OpenEXR")
     Imath = pytest.importorskip("Imath")
     batch = make_batch(t=1)
-    _, depth, focal, _ = nodes.DepthPro2Estimate.execute(wrapper, batch, 0.0, 0).result
+    _, depth, focal, _ = nodes.DepthPro2Estimate.execute(
+        wrapper, batch, estimate_focal_length=True, focal_length_mm=0.0
+    ).result
     nodes.DepthPro2SaveFloat.execute(depth, "integration/float", "exr", 0.0, focal_length_px=focal)
     path = next((output_dir / "integration").glob("float_*.exr"))
     src = OpenEXR.InputFile(str(path))
@@ -119,7 +140,9 @@ def test_save_float_exr_roundtrip(nodes, wrapper, output_dir, make_batch):
 
 def test_save_ply_roundtrip(nodes, wrapper, output_dir, make_batch):
     batch = make_batch(t=1)
-    _, depth, focal, _ = nodes.DepthPro2Estimate.execute(wrapper, batch, 0.0, 0).result
+    _, depth, focal, _ = nodes.DepthPro2Estimate.execute(
+        wrapper, batch, estimate_focal_length=True, focal_length_mm=0.0
+    ).result
     pos, valid = nodes.DepthPro2PositionPass.execute(depth, focal, 100.0, 0.0, 0.0).result
     nodes.DepthPro2SavePLY.execute(pos, valid, "integration/points", image=batch)
     path = next((output_dir / "integration").glob("points_*.ply"))
@@ -134,7 +157,7 @@ def test_save_ply_roundtrip(nodes, wrapper, output_dir, make_batch):
 
 
 def test_fp8_stream_reads_dequantized_weight(nodes, make_batch):
-    (wrapper,) = nodes.DepthPro2Loader.execute("depthpro2-s", "fp8", "auto").result
+    (wrapper,) = nodes.DepthPro2Loader.execute("depthpro2-s", "fp8", "cpu").result
     net, device = wrapper["model"], wrapper["device"]
     frames, _, _ = nodes._prepare_frames(make_batch(t=4), 0, 0.0)
     stream = net.stream(window=4, mode="unbuffered")

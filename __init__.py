@@ -10,6 +10,8 @@ from comfy_api.latest import ComfyExtension
 
 from . import nodes
 
+WEB_DIRECTORY = "./web"
+
 __all__ = ["comfy_entrypoint"]
 
 

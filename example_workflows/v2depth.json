@@ -20,10 +20,10 @@
       "mode": 0,
       "inputs": [],
       "outputs": [],
-      "title": "DepthPro2 \u00e2\u20ac\u201d Video to Depth",
+      "title": "DepthPro2 \u2014 Video to Depth",
       "properties": {},
       "widgets_values": [
-        "## DepthPro2 \u00e2\u20ac\u201d Video to Depth\n\nTemporally consistent metric depth for a video with [Apple Depth Pro 2](https://huggingface.co/apple/DepthPro2). Uses ComfyUI's built-in video nodes \u00e2\u20ac\u201d keep ComfyUI up to date.\n\n**How it works**\n- Frames are processed jointly in overlapping windows and share one focal length, so depth stays steady from frame to frame.\n- `window`: frames attended together (default 16). `overlap`: frames shared between consecutive windows (default 4). Longer windows / larger overlap = steadier but slower. `mode`: `buffered` lets each frame also see later frames; `unbuffered` predicts each frame from itself and earlier ones (lower latency and memory, overlap ignored).\n- `focal_length_mm`: 35mm-equivalent focal length in mm; `0` estimates one focal length from the first window. For cine cameras, link the **DepthPro2 Focal Length** node (physical mm + sensor size) to the optional `focal_length_px` input instead.\n- `max_size`: cap the longest side; `0` = native resolution.\n\n**Out of memory?** Lower `window` (and `overlap` with it) first, then `max_size`, then switch to a smaller model (`depthpro2-s`).\n\n**Output**\n- `depth_image` is normalized over the whole batch, so brightness does not flicker between frames. The source fps is carried through to the saved video.\n- `depth_meters` carries raw metric depth (`inf` at sky) for downstream use; `sky` is a MASK (1 at sky) for comp holdouts.\n\nWeights are licensed for **non-commercial research only** (Apple AMLR)."
+        "## DepthPro2 \u2014 Video to Depth\n\nTemporally consistent metric depth for a video with [Apple Depth Pro 2](https://huggingface.co/apple/DepthPro2). Uses ComfyUI's built-in video nodes \u2014 keep ComfyUI up to date.\n\n**How it works**\n- Copy the shipped `example.mp4` into `ComfyUI/input/` before running this example. The main checkpoint loads without the focal checkpoint; automatic estimation downloads and initializes the focal model on its first use, while an explicit focal pixel input skips it.\n- Frames are processed jointly in overlapping windows and share one focal length, so depth stays steady from frame to frame.\n- `window`: frames attended together (default 16). `overlap`: frames shared between consecutive windows (default 4). Longer windows / larger overlap = steadier but slower. `mode`: `buffered` lets each frame also see later frames; `unbuffered` predicts each frame from itself and earlier ones (lower latency and memory, overlap ignored).\n- `focal_length_mm`: 35mm-equivalent focal length in mm; `0` estimates one focal length from the first window. A linked `focal_length_px` overrides the mm value, including a linked `0.0` that requests estimation. For cine cameras, link the **DepthPro2 Focal Length** node (physical mm + sensor size) instead.\n- `max_size`: `0` chooses a budget-aware processing resolution accounting for the window, `-1` uses native resolution, and a positive value caps the longest side. Outputs are restored to the input size.\n\n**Out of memory?** Lower `window` (and `overlap` with it) first, set a smaller positive `max_size`, then switch to a smaller model (`depthpro2-s`). fp8 reduces weight storage but still dequantizes for compute.\n\n**Output**\n- `depth_image` is normalized over the whole batch, so brightness does not flicker between frames. The source fps is carried through to the saved video.\n- `depth_meters` carries raw metric depth (`inf` at sky) for downstream use; `sky_mask` is a MASK (1 at sky) for comp holdouts.\n\nWeights are licensed for **non-commercial research only** (Apple AMLR)."
       ]
     },
     {
@@ -88,8 +88,7 @@
         "cnr_id": "comfy-core"
       },
       "widgets_values": [
-        "example.mp4",
-        "image"
+        "example.mp4"
       ]
     },
     {
@@ -97,7 +96,7 @@
       "type": "GetVideoComponents",
       "pos": [
         390,
-        370
+        430
       ],
       "size": [
         260,
@@ -208,10 +207,10 @@
         16,
         4,
         true,
+        "buffered",
         0.0,
         0.0,
-        0,
-        "buffered"
+        0
       ]
     },
     {
@@ -301,7 +300,7 @@
       "type": "PreviewImage",
       "pos": [
         800,
-        260
+        330
       ],
       "size": [
         420,

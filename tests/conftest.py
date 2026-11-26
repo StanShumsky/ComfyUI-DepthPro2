@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+from enum import Enum
 import random
 import sys
 import tempfile
@@ -75,10 +76,31 @@ def _install_stubs() -> None:
     except Exception:
         pass
     mm = types.ModuleType("comfy.model_management")
+
+    class VRAMState(Enum):
+        DISABLED = 0
+        NO_VRAM = 1
+        LOW_VRAM = 2
+        NORMAL_VRAM = 3
+        HIGH_VRAM = 4
+        SHARED = 5
+
+    mm.VRAMState = VRAMState
+    mm.vram_state = VRAMState.NORMAL_VRAM
     mm.get_torch_device = lambda: torch.device(
         "mps" if torch.backends.mps.is_available() else "cpu"
     )
     mm.soft_empty_cache = lambda: None
+    mm.throw_exception_if_processing_interrupted = lambda: None
+
+    def is_oom(error):
+        accelerator_error = getattr(torch, "AcceleratorError", RuntimeError)
+        return isinstance(error, torch.OutOfMemoryError) or (
+            isinstance(error, accelerator_error)
+            and (getattr(error, "error_code", None) == 2 or "out of memory" in str(error).lower())
+        )
+
+    mm.is_oom = is_oom
     # Generous free memory: the auto max_size policy stays at native resolution in tests.
     mm.get_free_memory = lambda dev=None: 1 << 40
     mm.load_model_gpu = lambda patcher: patcher
@@ -201,9 +223,9 @@ def _install_comfy_api_stub() -> None:
         return T
 
     class _ComboInput(_Input):
-        def __init__(self, id, options=None, display_name=None, tooltip=None,
-                     optional=False, default=None, **kwargs):
-            super().__init__(id, display_name, tooltip, optional, **kwargs)
+        def __init__(self, id, options=None, display_name=None, optional=False, tooltip=None,
+                     default=None, **kwargs):
+            super().__init__(id, display_name, optional=optional, tooltip=tooltip, **kwargs)
             self.options = options or []
             self.default = default
 
@@ -306,6 +328,13 @@ def _install_comfy_api_stub() -> None:
             self.values = values
             self.animated = animated
 
+    class _PreviewText:
+        def __init__(self, value, **kwargs):
+            self.value = value
+
+        def as_dict(self):
+            return {"text": (self.value,)}
+
     _combo = type("Combo", (), {"Input": type("_ComboInput", (_ComboInput,), {"io_type": "COMBO"})})
     io = types.SimpleNamespace(
         Boolean=_type("Boolean", "BOOLEAN"),
@@ -322,6 +351,7 @@ def _install_comfy_api_stub() -> None:
     )
     ui = types.ModuleType("comfy_api.latest.ui")
     ui.PreviewImage = _PreviewImage
+    ui.PreviewText = _PreviewText
     latest = types.ModuleType("comfy_api.latest")
     latest.io = io
     latest.ui = ui
